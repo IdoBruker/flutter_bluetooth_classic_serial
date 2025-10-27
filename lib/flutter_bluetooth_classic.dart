@@ -226,6 +226,7 @@ class BluetoothConnectionState {
   });
 
   factory BluetoothConnectionState.fromMap(dynamic map) {
+    print(map);
     return BluetoothConnectionState(
       isConnected: map['isConnected'],
       deviceAddress: map['deviceAddress'],
@@ -248,6 +249,7 @@ class BluetoothData {
   }
 
   factory BluetoothData.fromMap(dynamic map) {
+    print(map);
     return BluetoothData(
       deviceAddress: map['deviceAddress'],
       data: List<int>.from(map['data']),
