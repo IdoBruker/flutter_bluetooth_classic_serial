@@ -232,11 +232,13 @@ class FlutterBluetoothClassicPlugin: FlutterPlugin, MethodCallHandler, ActivityA
         }
       }
       "disconnect" -> {
-        if (connectTask != null && connectTask!!.isConnected()) {
+        if (connectTask != null) {
           connectTask?.cancel()
+          connectTask = null
         }
-        if (listenTask != null && listenTask!!.isConnected()) {
+        if (listenTask != null) {
           listenTask?.cancel()
+          listenTask = null
         }
         result.success(true)
       }
@@ -253,7 +255,6 @@ class FlutterBluetoothClassicPlugin: FlutterPlugin, MethodCallHandler, ActivityA
         }
         
         try {
-//          val byteArray = data.map { it.toByte() }.toByteArray()
           if (connectTask != null && connectTask!!.isConnected()) {
             connectTask?.write(data)
           }
@@ -652,7 +653,7 @@ class ConnectTask(
         if (readingData) {
           val connectionMap = mapOf(
             "isConnected" to false,
-            "deviceAddress" to connectedDevice?.address,
+            "deviceAddress" to (connectedDevice?.address ?: "Unknown"),
             "status" to "DISCONNECTED: ${e.message}"
           )
           
@@ -693,8 +694,6 @@ class ConnectTask(
   }
   
   fun cancel() {
-    readingData = false
-    
     try {
       inputStream?.close()
       outputStream?.close()
