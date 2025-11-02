@@ -275,6 +275,12 @@ class FlutterBluetoothClassicPlugin: FlutterPlugin, MethodCallHandler, ActivityA
         }
       }
       "listen" -> {
+        var appName: String? = call.argument<String?>("appName")
+        if (appName == null || appName == "") {
+          // Fallback to a default value if no app name is provided
+          appName = "flutterBluetoothClassicApp"
+        }
+
         if (bluetoothAdapter == null) {
           result.error("BLUETOOTH_UNAVAILABLE", "Bluetooth is not available on this device", null)
           return
@@ -288,7 +294,7 @@ class FlutterBluetoothClassicPlugin: FlutterPlugin, MethodCallHandler, ActivityA
 
               // Connect to the device
               val serverSocket =
-                bluetoothAdapter?.listenUsingInsecureRfcommWithServiceRecord("flutterBluetoothClassicDemo", SPP_UUID)
+                bluetoothAdapter?.listenUsingInsecureRfcommWithServiceRecord(appName, SPP_UUID)
               if (serverSocket == null) {
                 result.error("LISTEN_FAILED", "Failed to listen for incoming connections", null)
                 return@checkPermissions
