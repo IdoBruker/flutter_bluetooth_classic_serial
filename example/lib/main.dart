@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -126,6 +127,11 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
   final TextEditingController _messageController = TextEditingController();
   bool _isConnecting = false;
 
+  // Discovery-related state
+  final Set<String> _discoveredDeviceAddresses = {};
+  bool _isScanning = false;
+  Timer? _discoveryTimer;
+
   @override
   void initState() {
     super.initState();
@@ -145,6 +151,7 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
         _loadPairedDevices();
         _listenToConnectionState();
         _listenToIncomingData();
+        _listenToDeviceDiscovery();
       }
     } catch (e) {
       debugPrint('Error initializing Bluetooth: $e');
@@ -157,6 +164,9 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
       setState(() {
         _pairedDevices = devices;
       });
+
+      // Start discovery to find devices in range
+      _startDiscoveryWithTimeout();
     } catch (e) {
       debugPrint('Error loading paired devices: $e');
     }
@@ -189,6 +199,54 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
         _receivedData += '${data.data}\n';
       });
     });
+  }
+
+  void _listenToDeviceDiscovery() {
+    _bluetooth.onDeviceDiscovered.listen((device) {
+      setState(() {
+        _discoveredDeviceAddresses.add(device.address);
+      });
+      debugPrint('Discovered device: ${device.name} (${device.address})');
+    });
+  }
+
+  Future<void> _startDiscoveryWithTimeout() async {
+    try {
+      // Cancel any existing timer
+      _discoveryTimer?.cancel();
+
+      // Clear previous discoveries
+      setState(() {
+        _discoveredDeviceAddresses.clear();
+        _isScanning = true;
+      });
+
+      // Start discovery
+      await _bluetooth.startDiscovery();
+      debugPrint('Started device discovery');
+
+      // Set timer to stop discovery after 8 seconds
+      _discoveryTimer = Timer(const Duration(seconds: 8), () async {
+        try {
+          await _bluetooth.stopDiscovery();
+          if (mounted) {
+            setState(() {
+              _isScanning = false;
+            });
+          }
+          debugPrint(
+            'Stopped device discovery. Found ${_discoveredDeviceAddresses.length} devices',
+          );
+        } catch (e) {
+          debugPrint('Error stopping discovery: $e');
+        }
+      });
+    } catch (e) {
+      debugPrint('Error starting discovery: $e');
+      setState(() {
+        _isScanning = false;
+      });
+    }
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
@@ -329,7 +387,7 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
 
             const SizedBox(height: 16),
 
-            // Paired Devices
+            // Nearby Devices (Filtered by Discovery)
             Expanded(
               flex: 2,
               child: Card(
@@ -341,70 +399,142 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(
-                            'Paired Devices',
-                            style: Theme.of(context).textTheme.titleMedium,
+                          Expanded(
+                            child: Row(
+                              children: [
+                                Text(
+                                  'Nearby Devices',
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.titleMedium,
+                                ),
+                                if (_isScanning) ...[
+                                  const SizedBox(width: 12),
+                                  const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  const Text(
+                                    'Scanning...',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
                           IconButton(
-                            onPressed: _loadPairedDevices,
+                            onPressed: _isScanning ? null : _loadPairedDevices,
                             icon: const Icon(Icons.refresh),
                           ),
                         ],
                       ),
                       const SizedBox(height: 8),
                       Expanded(
-                        child: _pairedDevices.isEmpty
-                            ? const Center(
-                                child: Text('No paired devices found'),
+                        child: () {
+                          // Filter devices to show only those discovered (in range)
+                          final nearbyDevices = _pairedDevices
+                              .where(
+                                (d) => _discoveredDeviceAddresses.contains(
+                                  d.address,
+                                ),
                               )
-                            : ListView.builder(
-                                itemCount: _pairedDevices.length,
-                                itemBuilder: (context, index) {
-                                  final device = _pairedDevices[index];
-                                  final isConnected =
-                                      _connectedDevice?.address ==
-                                      device.address;
-                                  return ListTile(
-                                    leading: Icon(
-                                      Icons.devices,
-                                      color: isConnected ? Colors.green : null,
+                              .toList();
+
+                          if (_pairedDevices.isEmpty) {
+                            return const Center(
+                              child: Text('No paired devices found'),
+                            );
+                          }
+
+                          if (_isScanning && nearbyDevices.isEmpty) {
+                            return const Center(
+                              child: Text('Scanning for nearby devices...'),
+                            );
+                          }
+
+                          if (!_isScanning && nearbyDevices.isEmpty) {
+                            return Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(
+                                    Icons.bluetooth_searching,
+                                    size: 48,
+                                    color: Colors.grey,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    'No paired devices in range',
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodyMedium,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  const Text(
+                                    'Make sure devices are powered on',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
                                     ),
-                                    title: Text(device.name),
-                                    subtitle: Text(device.address),
-                                    trailing: isConnected
-                                        ? ElevatedButton(
-                                            onPressed: _disconnect,
-                                            child: const Text('Disconnect'),
-                                          )
-                                        : ElevatedButton(
-                                            onPressed:
-                                                _connectionState?.isConnected !=
-                                                        true &&
-                                                    !_isConnecting
-                                                ? () => _connectToDevice(device)
-                                                : null,
-                                            child: _isConnecting
-                                                ? const Row(
-                                                    mainAxisSize:
-                                                        MainAxisSize.min,
-                                                    children: [
-                                                      SizedBox(
-                                                        width: 16,
-                                                        height: 16,
-                                                        child:
-                                                            CircularProgressIndicator(
-                                                              strokeWidth: 2,
-                                                            ),
-                                                      ),
-                                                      SizedBox(width: 8),
-                                                      Text('Connecting...'),
-                                                    ],
-                                                  )
-                                                : const Text('Connect'),
-                                          ),
-                                  );
-                                },
+                                  ),
+                                ],
                               ),
+                            );
+                          }
+
+                          return ListView.builder(
+                            itemCount: nearbyDevices.length,
+                            itemBuilder: (context, index) {
+                              final device = nearbyDevices[index];
+                              final isConnected =
+                                  _connectedDevice?.address == device.address;
+                              return ListTile(
+                                leading: Icon(
+                                  Icons.devices,
+                                  color: isConnected
+                                      ? Colors.green
+                                      : Colors.blue,
+                                ),
+                                title: Text(device.name),
+                                subtitle: Text(device.address),
+                                trailing: isConnected
+                                    ? ElevatedButton(
+                                        onPressed: _disconnect,
+                                        child: const Text('Disconnect'),
+                                      )
+                                    : ElevatedButton(
+                                        onPressed:
+                                            _connectionState?.isConnected !=
+                                                    true &&
+                                                !_isConnecting
+                                            ? () => _connectToDevice(device)
+                                            : null,
+                                        child: _isConnecting
+                                            ? const Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  SizedBox(
+                                                    width: 16,
+                                                    height: 16,
+                                                    child:
+                                                        CircularProgressIndicator(
+                                                          strokeWidth: 2,
+                                                        ),
+                                                  ),
+                                                  SizedBox(width: 8),
+                                                  Text('Connecting...'),
+                                                ],
+                                              )
+                                            : const Text('Connect'),
+                                      ),
+                              );
+                            },
+                          );
+                        }(),
                       ),
                     ],
                   ),
@@ -509,6 +639,7 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
   @override
   void dispose() {
     _messageController.dispose();
+    _discoveryTimer?.cancel();
     super.dispose();
   }
 }

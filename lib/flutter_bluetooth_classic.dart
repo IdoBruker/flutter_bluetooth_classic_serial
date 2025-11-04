@@ -21,12 +21,16 @@ class FlutterBluetoothClassic {
   final _connectionStreamController =
       StreamController<BluetoothConnectionState>.broadcast();
   final _dataStreamController = StreamController<BluetoothData>.broadcast();
+  final _discoveredDevicesController =
+      StreamController<BluetoothDevice>.broadcast();
 
   // Public streams that can be subscribed to
   Stream<BluetoothState> get onStateChanged => _stateStreamController.stream;
   Stream<BluetoothConnectionState> get onConnectionChanged =>
       _connectionStreamController.stream;
   Stream<BluetoothData> get onDataReceived => _dataStreamController.stream;
+  Stream<BluetoothDevice> get onDeviceDiscovered =>
+      _discoveredDevicesController.stream;
 
   String _appName = "";
 
@@ -39,9 +43,25 @@ class FlutterBluetoothClassic {
   /// Private constructor that sets up the event listeners
   FlutterBluetoothClassic._(String appName) {
     _appName = appName;
-    // Listen for state changes
+    // Listen for state changes and device discovery events
     _stateChannel.receiveBroadcastStream().listen((dynamic event) {
-      _stateStreamController.add(BluetoothState.fromMap(event));
+      // Check if this is a special event (deviceFound, permissionResult, etc.)
+      if (event is Map && event.containsKey('event')) {
+        final String eventType = event['event'];
+
+        if (eventType == 'deviceFound') {
+          // Handle device discovery
+          final deviceMap = event['device'];
+          if (deviceMap != null) {
+            final device = BluetoothDevice.fromMap(deviceMap);
+            _discoveredDevicesController.add(device);
+          }
+        }
+        // Other event types can be handled here if needed
+      } else {
+        // Regular state change event
+        _stateStreamController.add(BluetoothState.fromMap(event));
+      }
     });
 
     // Listen for connection changes
@@ -169,6 +189,7 @@ class FlutterBluetoothClassic {
     _stateStreamController.close();
     _connectionStreamController.close();
     _dataStreamController.close();
+    _discoveredDevicesController.close();
   }
 }
 
