@@ -1,0 +1,8 @@
+#ifndef FLUTTER_PLUGIN_FLUTTER_BLUETOOTH_CLASSIC_PLUGIN_H_
+#define FLUTTER_PLUGIN_FLUTTER_BLUETOOTH_CLASSIC_PLUGIN_H_
+
+// Forward to the C API header
+#include "flutter_bluetooth_classic_plugin_c_api.h"
+
+#endif  // FLUTTER_PLUGIN_FLUTTER_BLUETOOTH_CLASSIC_PLUGIN_H_
+

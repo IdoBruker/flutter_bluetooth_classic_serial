@@ -32,18 +32,18 @@ abstract class FlutterBluetoothClassicPlatform extends PlatformInterface {
   Future<bool> listen();
   Future<bool> disconnect();
   Future<bool> stopListen();
-  Future<bool> sendData(List<int> data);
+  Future<bool> sendData(Uint8List data);
 }
 
 class _DefaultPlatform extends FlutterBluetoothClassicPlatform {
-  static const MethodChannel _channel =
-      MethodChannel('flutter_bluetooth_classic');
-  static const EventChannel _stateChannel =
-      EventChannel('flutter_bluetooth_classic_state');
-  static const EventChannel _connectionChannel =
-      EventChannel('flutter_bluetooth_classic_connection');
-  static const EventChannel _dataChannel =
-      EventChannel('flutter_bluetooth_classic_data');
+  static const MethodChannel _channel = MethodChannel(
+      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic');
+  static const EventChannel _stateChannel = EventChannel(
+      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_state');
+  static const EventChannel _connectionChannel = EventChannel(
+      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_connection');
+  static const EventChannel _dataChannel = EventChannel(
+      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_data');
 
   @override
   Stream<Map<String, dynamic>> get stateStream =>
@@ -94,6 +94,7 @@ class _DefaultPlatform extends FlutterBluetoothClassicPlatform {
         false;
   }
 
+  @override
   Future<bool> listen() async {
     return await _channel.invokeMethod('listen') ?? false;
   }
@@ -109,7 +110,7 @@ class _DefaultPlatform extends FlutterBluetoothClassicPlatform {
   }
 
   @override
-  Future<bool> sendData(List<int> data) async {
+  Future<bool> sendData(Uint8List data) async {
     return await _channel.invokeMethod('sendData', {'data': data}) ?? false;
   }
 }

@@ -76,14 +76,14 @@ public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
       
     case "sendData":
       guard let args = call.arguments as? [String: Any],
-            let data = args["data"] as? [Int] else {
+            let typedData = args["data"] as? FlutterStandardTypedData else {
         result(FlutterError(code: "INVALID_ARGUMENT",
                            message: "Data is required",
                            details: nil))
         return
       }
-      let bytes = data.map { UInt8($0) }
-      bluetoothManager?.sendData(Data(bytes), completion: result)
+      // FlutterStandardTypedData.data is already a Data object
+      bluetoothManager?.sendData(typedData.data, completion: result)
       
     default:
       result(FlutterMethodNotImplemented)
@@ -162,6 +162,9 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   private let connectionHandler: BluetoothConnectionStreamHandler
   private let dataHandler: BluetoothDataStreamHandler
   
+  // Background queue for Bluetooth operations to prevent UI blocking
+  private let bluetoothQueue = DispatchQueue(label: "com.flutter_bluetooth_classic.bluetooth", qos: .userInitiated)
+  
   init(stateHandler: BluetoothStateStreamHandler,
        connectionHandler: BluetoothConnectionStreamHandler,
        dataHandler: BluetoothDataStreamHandler) {
@@ -169,68 +172,89 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     self.connectionHandler = connectionHandler
     self.dataHandler = dataHandler
     super.init()
-    centralManager = CBCentralManager(delegate: self, queue: nil)
+    // Use background queue to prevent blocking UI thread
+    centralManager = CBCentralManager(delegate: self, queue: bluetoothQueue)
   }
   
   func isBluetoothEnabled(completion: @escaping FlutterResult) {
     let isEnabled = centralManager.state == .poweredOn
-    completion(isEnabled)
+    DispatchQueue.main.async {
+      completion(isEnabled)
+    }
   }
   
   func getPairedDevices(completion: @escaping FlutterResult) {
     // iOS doesn't maintain a list of paired devices
-    completion([])
+    DispatchQueue.main.async {
+      completion([])
+    }
   }
   
   func startDiscovery(completion: @escaping FlutterResult) {
     guard centralManager.state == .poweredOn else {
-      completion(FlutterError(code: "BLUETOOTH_OFF",
-                            message: "Bluetooth is not enabled",
-                            details: nil))
+      DispatchQueue.main.async {
+        completion(FlutterError(code: "BLUETOOTH_OFF",
+                              message: "Bluetooth is not enabled",
+                              details: nil))
+      }
       return
     }
     
     centralManager.scanForPeripherals(withServices: nil)
-    completion(true)
+    DispatchQueue.main.async {
+      completion(true)
+    }
   }
   
   func stopDiscovery(completion: @escaping FlutterResult) {
     centralManager.stopScan()
-    completion(true)
+    DispatchQueue.main.async {
+      completion(true)
+    }
   }
   
   func connect(address: String, completion: @escaping FlutterResult) {
     guard let uuid = UUID(uuidString: address),
           let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
-      completion(FlutterError(code: "DEVICE_NOT_FOUND",
-                            message: "Device not found",
-                            details: nil))
+      DispatchQueue.main.async {
+        completion(FlutterError(code: "DEVICE_NOT_FOUND",
+                              message: "Device not found",
+                              details: nil))
+      }
       return
     }
     
     connectedPeripheral = peripheral
     peripheral.delegate = self
     centralManager.connect(peripheral, options: nil)
-    completion(true)
+    DispatchQueue.main.async {
+      completion(true)
+    }
   }
   
   func disconnect(completion: @escaping FlutterResult) {
     if let peripheral = connectedPeripheral {
       centralManager.cancelPeripheralConnection(peripheral)
     }
-    completion(true)
+    DispatchQueue.main.async {
+      completion(true)
+    }
   }
   
   func sendData(_ data: Data, completion: @escaping FlutterResult) {
     guard let characteristic = characteristics.first else {
-      completion(FlutterError(code: "NOT_CONNECTED",
-                            message: "No characteristic available",
-                            details: nil))
+      DispatchQueue.main.async {
+        completion(FlutterError(code: "NOT_CONNECTED",
+                              message: "No characteristic available",
+                              details: nil))
+      }
       return
     }
     
     connectedPeripheral?.writeValue(data, for: characteristic, type: .withResponse)
-    completion(true)
+    DispatchQueue.main.async {
+      completion(true)
+    }
   }
   
   // MARK: - CBCentralManagerDelegate

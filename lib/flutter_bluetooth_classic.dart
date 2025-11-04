@@ -146,7 +146,7 @@ class FlutterBluetoothClassic {
   }
 
   /// Send data to the connected device
-  Future<bool> sendData(List<int> data) async {
+  Future<bool> sendData(Uint8List data) async {
     try {
       return await _channel.invokeMethod('sendData', {'data': data});
     } catch (e) {
@@ -157,7 +157,7 @@ class FlutterBluetoothClassic {
   /// Send string data to the connected device
   Future<bool> sendString(String message) async {
     try {
-      final List<int> data = utf8.encode(message);
+      final Uint8List data = Uint8List.fromList(utf8.encode(message));
       return await sendData(data);
     } catch (e) {
       throw BluetoothException('Failed to send string: $e');
@@ -256,7 +256,7 @@ class BluetoothData {
   });
 
   String asString() {
-    return utf8.decode(data);
+    return utf8.decode(data, allowMalformed: true);
   }
 
   factory BluetoothData.fromMap(dynamic map) {

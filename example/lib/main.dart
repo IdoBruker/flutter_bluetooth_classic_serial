@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_classic_serial/flutter_bluetooth_classic.dart';
 
@@ -122,6 +124,7 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
   BluetoothDevice? _connectedDevice;
   String _receivedData = '';
   final TextEditingController _messageController = TextEditingController();
+  bool _isConnecting = false;
 
   @override
   void initState() {
@@ -183,12 +186,16 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
   void _listenToIncomingData() {
     _bluetooth.onDataReceived.listen((data) {
       setState(() {
-        _receivedData += '${data.asString()}\n';
+        _receivedData += '${data.data}\n';
       });
     });
   }
 
   Future<void> _connectToDevice(BluetoothDevice device) async {
+    setState(() {
+      _isConnecting = true;
+    });
+
     try {
       await _bluetooth.connect(device.address);
     } catch (e) {
@@ -197,6 +204,12 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('Failed to connect: $e')));
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isConnecting = false;
+        });
       }
     }
   }
@@ -209,11 +222,34 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
     }
   }
 
+  int _calculateChecksum(Uint8List msg) {
+    int cs = 0;
+    for (int i = 0; i < msg.length - 1; i++) {
+      cs = (cs + msg[i]) & 0xFF;
+    }
+    return (0x00 - cs) & 0xFF;
+  }
+
   Future<void> _sendMessage() async {
-    if (_messageController.text.isNotEmpty &&
-        _connectionState?.isConnected == true) {
+    if (_connectionState?.isConnected == true) {
       try {
-        await _bluetooth.sendString(_messageController.text);
+        ByteData bufferBuilder = ByteData(4);
+        bufferBuilder.setUint8(0, 0x47);
+        bufferBuilder.setUint8(1, 0x14);
+        bufferBuilder.setUint8(2, 0x22);
+        bufferBuilder.setUint8(3, 0);
+
+        bufferBuilder.setUint8(
+          3,
+          _calculateChecksum(bufferBuilder.buffer.asUint8List()),
+        );
+        Uint8List msg = bufferBuilder.buffer.asUint8List();
+
+        // Send Uint8List directly to platform channel (zero-copy)
+        await _bluetooth.sendData(msg);
+        debugPrint(
+          'Sent CMD_RUN message: ${msg.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(', ')}',
+        );
         _messageController.clear();
       } catch (e) {
         debugPrint('Error sending message: $e');
@@ -343,10 +379,28 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                                         : ElevatedButton(
                                             onPressed:
                                                 _connectionState?.isConnected !=
-                                                    true
+                                                        true &&
+                                                    !_isConnecting
                                                 ? () => _connectToDevice(device)
                                                 : null,
-                                            child: const Text('Connect'),
+                                            child: _isConnecting
+                                                ? const Row(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      SizedBox(
+                                                        width: 16,
+                                                        height: 16,
+                                                        child:
+                                                            CircularProgressIndicator(
+                                                              strokeWidth: 2,
+                                                            ),
+                                                      ),
+                                                      SizedBox(width: 8),
+                                                      Text('Connecting...'),
+                                                    ],
+                                                  )
+                                                : const Text('Connect'),
                                           ),
                                   );
                                 },

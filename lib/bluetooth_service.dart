@@ -155,7 +155,7 @@ class BluetoothService {
     }
   }
 
-  static Future<bool> sendData(List<int> data) async {
+  static Future<bool> sendData(Uint8List data) async {
     try {
       if (kIsWeb) {
         throw PlatformException(
