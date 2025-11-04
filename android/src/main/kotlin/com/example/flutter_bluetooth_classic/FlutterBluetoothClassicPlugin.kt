@@ -244,41 +244,50 @@ class FlutterBluetoothClassicPlugin: FlutterPlugin, MethodCallHandler, ActivityA
                   return@launch
                 }
                 
-                // Connect to the device
+                // Connect to the device - now waits for actual connection
                 outgoingConnectionCreator = OutgoingConnectionCreator(device, SPP_UUID)
-                outgoingConnectionCreator?.createConnection(
-                  onConnectionCreated = {socket ->
-                    activeConnection =
-                      ActiveConnection(
-                        socket,
-                        connectionStreamHandler,
-                        dataStreamHandler,
-                        cleanupFn = {
-                          activeConnection = null
-                        })
-                    activeConnection?.startReceivingData()
-
-                    val connectionMap = mapOf(
-                      "isConnected" to true,
-                      "deviceAddress" to socket.remoteDevice?.address,
-                      "status" to "CONNECTED"
-                    )
-                    connectionStreamHandler.send(connectionMap)
-                  },
-                  onError = { e ->
-                    val connectionMap = mapOf(
-                      "isConnected" to false,
-                      "deviceAddress" to (device.address ?: ""),
-                      "status" to "ERROR: ${e.message}"
-                    )
-                    connectionStreamHandler.send(connectionMap)
+                val socket = outgoingConnectionCreator?.createConnection()
+                
+                if (socket == null) {
+                  withContext(Dispatchers.Main) {
+                    result.error("CONNECTION_FAILED", "Failed to create connection", null)
+                  }
+                  return@launch
+                }
+                
+                // Connection successful - set up active connection
+                activeConnection = ActiveConnection(
+                  socket,
+                  connectionStreamHandler,
+                  dataStreamHandler,
+                  cleanupFn = {
+                    activeConnection = null
                   }
                 )
+                activeConnection?.startReceivingData()
+
+                // Send connection state event
+                val connectionMap = mapOf(
+                  "isConnected" to true,
+                  "deviceAddress" to socket.remoteDevice?.address,
+                  "status" to "CONNECTED"
+                )
+                connectionStreamHandler.send(connectionMap)
                 
+                // Return success to Flutter
                 withContext(Dispatchers.Main) {
                   result.success(true)
                 }
               } catch (e: Exception) {
+                // Send connection error event
+                val connectionMap = mapOf(
+                  "isConnected" to false,
+                  "deviceAddress" to address,
+                  "status" to "ERROR: ${e.message}"
+                )
+                connectionStreamHandler.send(connectionMap)
+                
+                // Return error to Flutter
                 withContext(Dispatchers.Main) {
                   result.error("CONNECTION_FAILED", "Failed to connect to device: ${e.message}", null)
                 }
@@ -695,17 +704,15 @@ class OutgoingConnectionCreator(
   private val device: BluetoothDevice?,
   private val uuid: UUID,
 ) {
-  fun createConnection(onConnectionCreated: (socket: BluetoothSocket) -> Unit, onError: (Exception) -> Unit) {
-    CoroutineScope(Dispatchers.IO).launch {
-      try {
-        // Create socket and connect
-        val socket = device?.createRfcommSocketToServiceRecord(uuid)
-        socket?.connect()
-
-        onConnectionCreated(socket!!)
-      } catch (e: IOException) {
-        onError(e)
-      }
+  suspend fun createConnection(): BluetoothSocket = withContext(Dispatchers.IO) {
+    try {
+      // Create socket and connect
+      val socket = device?.createRfcommSocketToServiceRecord(uuid)
+        ?: throw IOException("Failed to create socket: device is null")
+      socket.connect()
+      socket
+    } catch (e: IOException) {
+      throw e
     }
   }
 }

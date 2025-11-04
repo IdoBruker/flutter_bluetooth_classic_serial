@@ -165,6 +165,11 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   // Background queue for Bluetooth operations to prevent UI blocking
   private let bluetoothQueue = DispatchQueue(label: "com.flutter_bluetooth_classic.bluetooth", qos: .userInitiated)
   
+  // Store pending connection completion handler
+  private var pendingConnectionCompletion: FlutterResult?
+  private var pendingConnectionAddress: String?
+  private var connectionTimeoutTimer: Timer?
+  
   init(stateHandler: BluetoothStateStreamHandler,
        connectionHandler: BluetoothConnectionStreamHandler,
        dataHandler: BluetoothDataStreamHandler) {
@@ -224,12 +229,42 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
       return
     }
     
+    // Cancel any existing connection timeout
+    connectionTimeoutTimer?.invalidate()
+    
+    // Store completion handler and address for later
+    pendingConnectionCompletion = completion
+    pendingConnectionAddress = address
+    
+    // Set up connection timeout (10 seconds)
+    connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
+      guard let self = self else { return }
+      
+      // Connection timed out
+      if let pendingCompletion = self.pendingConnectionCompletion {
+        self.centralManager.cancelPeripheralConnection(peripheral)
+        
+        DispatchQueue.main.async {
+          pendingCompletion(FlutterError(code: "CONNECTION_TIMEOUT",
+                                        message: "Connection timed out after 10 seconds",
+                                        details: nil))
+        }
+        
+        // Send connection error event
+        self.connectionHandler.send([
+          "isConnected": false,
+          "deviceAddress": address,
+          "status": "TIMEOUT"
+        ])
+        
+        self.pendingConnectionCompletion = nil
+        self.pendingConnectionAddress = nil
+      }
+    }
+    
     connectedPeripheral = peripheral
     peripheral.delegate = self
     centralManager.connect(peripheral, options: nil)
-    DispatchQueue.main.async {
-      completion(true)
-    }
   }
   
   func disconnect(completion: @escaping FlutterResult) {
@@ -300,12 +335,51 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
   }
   
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+    // Cancel the connection timeout timer
+    connectionTimeoutTimer?.invalidate()
+    connectionTimeoutTimer = nil
+    
+    // Call the pending completion handler
+    if let pendingCompletion = pendingConnectionCompletion {
+      DispatchQueue.main.async {
+        pendingCompletion(true)
+      }
+      pendingConnectionCompletion = nil
+      pendingConnectionAddress = nil
+    }
+    
     peripheral.discoverServices(nil)
     
     connectionHandler.send([
       "isConnected": true,
       "deviceAddress": peripheral.identifier.uuidString,
       "status": "CONNECTED"
+    ])
+  }
+  
+  func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
+    // Cancel the connection timeout timer
+    connectionTimeoutTimer?.invalidate()
+    connectionTimeoutTimer = nil
+    
+    let errorMessage = error?.localizedDescription ?? "Unknown error"
+    
+    // Call the pending completion handler with error
+    if let pendingCompletion = pendingConnectionCompletion {
+      DispatchQueue.main.async {
+        pendingCompletion(FlutterError(code: "CONNECTION_FAILED",
+                                      message: "Failed to connect: \(errorMessage)",
+                                      details: nil))
+      }
+      pendingConnectionCompletion = nil
+      pendingConnectionAddress = nil
+    }
+    
+    // Send connection error event
+    connectionHandler.send([
+      "isConnected": false,
+      "deviceAddress": peripheral.identifier.uuidString,
+      "status": "ERROR: \(errorMessage)"
     ])
   }
   
