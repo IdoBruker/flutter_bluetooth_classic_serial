@@ -1,6 +1,6 @@
 import Flutter
 import UIKit
-import CoreBluetooth
+import ExternalAccessory
 
 // MARK: - Plugin
 public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
@@ -13,13 +13,14 @@ public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
   private let connectionStreamHandler = BluetoothConnectionStreamHandler()
   private let dataStreamHandler = BluetoothDataStreamHandler()
   
-  private var bluetoothManager: BluetoothManager?
+  private var accessoryManager: ExternalAccessoryManager?
   
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = SwiftFlutterBluetoothClassicPlugin(registrar: registrar)
     registrar.addMethodCallDelegate(instance, channel: instance.methodChannel)
   }
-    init(registrar: FlutterPluginRegistrar) {
+  
+  init(registrar: FlutterPluginRegistrar) {
     methodChannel = FlutterMethodChannel(name: "com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic", binaryMessenger: registrar.messenger())
     stateChannel = FlutterEventChannel(name: "com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_state", binaryMessenger: registrar.messenger())
     connectionChannel = FlutterEventChannel(name: "com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_connection", binaryMessenger: registrar.messenger())
@@ -31,7 +32,7 @@ public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
     connectionChannel.setStreamHandler(connectionStreamHandler)
     dataChannel.setStreamHandler(dataStreamHandler)
     
-    bluetoothManager = BluetoothManager(
+    accessoryManager = ExternalAccessoryManager(
       stateHandler: stateStreamHandler,
       connectionHandler: connectionStreamHandler,
       dataHandler: dataStreamHandler
@@ -44,7 +45,9 @@ public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
       result(true) // iOS always supports Bluetooth
       
     case "isBluetoothEnabled":
-      bluetoothManager?.isBluetoothEnabled(completion: result)
+      // ExternalAccessory doesn't provide Bluetooth on/off status
+      // We assume it's enabled if accessories are available
+      result(true)
       
     case "enableBluetooth":
       // iOS doesn't allow programmatic enabling of Bluetooth
@@ -53,13 +56,13 @@ public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
                          details: nil))
       
     case "getPairedDevices":
-      bluetoothManager?.getPairedDevices(completion: result)
+      accessoryManager?.getPairedDevices(completion: result)
       
     case "startDiscovery":
-      bluetoothManager?.startDiscovery(completion: result)
+      accessoryManager?.startDiscovery(completion: result)
       
     case "stopDiscovery":
-      bluetoothManager?.stopDiscovery(completion: result)
+      accessoryManager?.stopDiscovery(completion: result)
       
     case "connect":
       guard let args = call.arguments as? [String: Any],
@@ -69,10 +72,10 @@ public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
                            details: nil))
         return
       }
-      bluetoothManager?.connect(address: address, completion: result)
+      accessoryManager?.connect(address: address, completion: result)
       
     case "disconnect":
-      bluetoothManager?.disconnect(completion: result)
+      accessoryManager?.disconnect(completion: result)
       
     case "sendData":
       guard let args = call.arguments as? [String: Any],
@@ -82,8 +85,20 @@ public class SwiftFlutterBluetoothClassicPlugin: NSObject, FlutterPlugin {
                            details: nil))
         return
       }
-      // FlutterStandardTypedData.data is already a Data object
-      bluetoothManager?.sendData(typedData.data, completion: result)
+      accessoryManager?.sendData(typedData.data, completion: result)
+      
+    case "listen":
+      // iOS ExternalAccessory doesn't support acting as a Bluetooth server
+      // You can only connect to existing MFi accessories, not advertise and accept connections
+      result(FlutterError(code: "UNSUPPORTED",
+                         message: "iOS does not support acting as a Bluetooth server for ExternalAccessory. Use connect() to connect to existing accessories.",
+                         details: nil))
+      
+    case "stopListen":
+      // iOS ExternalAccessory doesn't support acting as a Bluetooth server
+      result(FlutterError(code: "UNSUPPORTED",
+                         message: "iOS does not support acting as a Bluetooth server for ExternalAccessory.",
+                         details: nil))
       
     default:
       result(FlutterMethodNotImplemented)
@@ -152,23 +167,35 @@ class BluetoothDataStreamHandler: NSObject, FlutterStreamHandler {
   }
 }
 
-// MARK: - Bluetooth Manager
-class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
-  private var centralManager: CBCentralManager!
-  private var connectedPeripheral: CBPeripheral?
-  private var characteristics: [CBCharacteristic] = []
+// MARK: - External Accessory Manager
+class ExternalAccessoryManager: NSObject {
+  // Protocol string for MFi accessories
+  private let PROTOCOL_STRING = "Tigaro.com"
+  
+  // Supported device name prefixes (case-insensitive)
+  private let SUPPORTED_DEVICES = ["labdisc", "minidisc", "datahub", "forceacc"]
+  
+  private var currentAccessory: EAAccessory?
+  private var currentSession: EASession?
+  private var inputStream: InputStream?
+  private var outputStream: OutputStream?
   
   private let stateHandler: BluetoothStateStreamHandler
   private let connectionHandler: BluetoothConnectionStreamHandler
   private let dataHandler: BluetoothDataStreamHandler
   
-  // Background queue for Bluetooth operations to prevent UI blocking
-  private let bluetoothQueue = DispatchQueue(label: "com.flutter_bluetooth_classic.bluetooth", qos: .userInitiated)
+  // Dedicated thread for stream operations with RunLoop
+  private var streamThread: Thread?
+  private var streamRunLoop: RunLoop?
+  private var isStreamThreadRunning = false
   
-  // Store pending connection completion handler
-  private var pendingConnectionCompletion: FlutterResult?
-  private var pendingConnectionAddress: String?
-  private var connectionTimeoutTimer: Timer?
+  // Track connection state to prevent race conditions
+  private var isConnecting = false
+  private let connectionLock = NSLock()
+  
+  // Buffer for reading data
+  private let readBufferSize = 1024
+  private var readBuffer: UnsafeMutablePointer<UInt8>
   
   init(stateHandler: BluetoothStateStreamHandler,
        connectionHandler: BluetoothConnectionStreamHandler,
@@ -176,51 +203,166 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     self.stateHandler = stateHandler
     self.connectionHandler = connectionHandler
     self.dataHandler = dataHandler
+    self.readBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: readBufferSize)
+    
     super.init()
-    // Use background queue to prevent blocking UI thread
-    centralManager = CBCentralManager(delegate: self, queue: bluetoothQueue)
+    
+    // Register for accessory notifications
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(accessoryDidConnect(_:)),
+      name: .EAAccessoryDidConnect,
+      object: nil
+    )
+    
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(accessoryDidDisconnect(_:)),
+      name: .EAAccessoryDidDisconnect,
+      object: nil
+    )
+    
+    // Register for notifications
+    EAAccessoryManager.shared().registerForLocalNotifications()
+    
+    // Send initial state
+    sendBluetoothState(isEnabled: true)
   }
   
-  func isBluetoothEnabled(completion: @escaping FlutterResult) {
-    let isEnabled = centralManager.state == .poweredOn
-    DispatchQueue.main.async {
-      completion(isEnabled)
+  deinit {
+    readBuffer.deallocate()
+    NotificationCenter.default.removeObserver(self)
+    stopStreamThread()
+  }
+  
+  // MARK: - Notification Handlers
+  
+  @objc private func accessoryDidConnect(_ notification: Notification) {
+    guard let accessory = notification.userInfo?[EAAccessoryKey] as? EAAccessory else {
+      return
+    }
+    
+    // Check if this is a supported device
+    let deviceName = accessory.name.lowercased()
+    let isSupported = SUPPORTED_DEVICES.contains { deviceName.contains($0) }
+    
+    if isSupported {
+      // Send device found event
+      let deviceMap: [String: Any] = [
+        "name": accessory.name,
+        "address": String(accessory.connectionID),
+        "paired": true
+      ]
+      
+      stateHandler.send([
+        "event": "deviceFound",
+        "device": deviceMap
+      ])
     }
   }
   
+  @objc private func accessoryDidDisconnect(_ notification: Notification) {
+    guard let accessory = notification.userInfo?[EAAccessoryKey] as? EAAccessory else {
+      return
+    }
+    
+    // If the disconnected accessory is our current connection
+    if accessory.connectionID == currentAccessory?.connectionID {
+      closeSession()
+      
+      connectionHandler.send([
+        "isConnected": false,
+        "deviceAddress": String(accessory.connectionID),
+        "status": "DISCONNECTED"
+      ])
+    }
+  }
+  
+  // MARK: - Public Methods
+  
   func getPairedDevices(completion: @escaping FlutterResult) {
-    // iOS doesn't maintain a list of paired devices
+    let accessories = EAAccessoryManager.shared().connectedAccessories
+    
+    let devices = accessories.compactMap { accessory -> [String: Any]? in
+      // Filter to only supported devices
+      let deviceName = accessory.name.lowercased()
+      let isSupported = SUPPORTED_DEVICES.contains { deviceName.contains($0) }
+      
+      guard isSupported else { return nil }
+      
+      return [
+        "name": accessory.name,
+        "address": String(accessory.connectionID),
+        "paired": true
+      ]
+    }
+    
     DispatchQueue.main.async {
-      completion([])
+      completion(devices)
     }
   }
   
   func startDiscovery(completion: @escaping FlutterResult) {
-    guard centralManager.state == .poweredOn else {
-      DispatchQueue.main.async {
-        completion(FlutterError(code: "BLUETOOTH_OFF",
-                              message: "Bluetooth is not enabled",
-                              details: nil))
+    // ExternalAccessory doesn't have active discovery like Bluetooth Classic on other platforms
+    // Instead, we return the list of connected accessories and show the picker
+    // The OS handles pairing through Settings
+    
+    // First, send events for all currently connected supported devices
+    let accessories = EAAccessoryManager.shared().connectedAccessories
+    for accessory in accessories {
+      let deviceName = accessory.name.lowercased()
+      let isSupported = SUPPORTED_DEVICES.contains { deviceName.contains($0) }
+      
+      if isSupported {
+        let deviceMap: [String: Any] = [
+          "name": accessory.name,
+          "address": String(accessory.connectionID),
+          "paired": true
+        ]
+        
+        stateHandler.send([
+          "event": "deviceFound",
+          "device": deviceMap
+        ])
       }
-      return
     }
     
-    centralManager.scanForPeripherals(withServices: nil)
-    DispatchQueue.main.async {
-      completion(true)
+    // Show the accessory picker dialog to allow user to connect new accessories
+    EAAccessoryManager.shared().showBluetoothAccessoryPicker(withNameFilter: nil) { error in
+      if let error = error {
+        DispatchQueue.main.async {
+          completion(FlutterError(code: "DISCOVERY_ERROR",
+                                message: "Failed to show accessory picker: \(error.localizedDescription)",
+                                details: nil))
+        }
+      } else {
+        DispatchQueue.main.async {
+          completion(true)
+        }
+      }
     }
   }
   
   func stopDiscovery(completion: @escaping FlutterResult) {
-    centralManager.stopScan()
+    // Discovery is managed by the OS, nothing to stop
     DispatchQueue.main.async {
       completion(true)
     }
   }
   
   func connect(address: String, completion: @escaping FlutterResult) {
-    guard let uuid = UUID(uuidString: address),
-          let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
+    // Find accessory by connection ID
+    guard let connectionID = UInt(address) else {
+      DispatchQueue.main.async {
+        completion(FlutterError(code: "INVALID_ADDRESS",
+                              message: "Invalid device address",
+                              details: nil))
+      }
+      return
+    }
+    
+    let accessories = EAAccessoryManager.shared().connectedAccessories
+    guard let accessory = accessories.first(where: { $0.connectionID == connectionID }) else {
       DispatchQueue.main.async {
         completion(FlutterError(code: "DEVICE_NOT_FOUND",
                               message: "Device not found",
@@ -229,191 +371,257 @@ class BluetoothManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
       return
     }
     
-    // Cancel any existing connection timeout
-    connectionTimeoutTimer?.invalidate()
-    
-    // Store completion handler and address for later
-    pendingConnectionCompletion = completion
-    pendingConnectionAddress = address
-    
-    // Set up connection timeout (10 seconds)
-    connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { [weak self] _ in
-      guard let self = self else { return }
-      
-      // Connection timed out
-      if let pendingCompletion = self.pendingConnectionCompletion {
-        self.centralManager.cancelPeripheralConnection(peripheral)
-        
-        DispatchQueue.main.async {
-          pendingCompletion(FlutterError(code: "CONNECTION_TIMEOUT",
-                                        message: "Connection timed out after 10 seconds",
-                                        details: nil))
-        }
-        
-        // Send connection error event
-        self.connectionHandler.send([
-          "isConnected": false,
-          "deviceAddress": address,
-          "status": "TIMEOUT"
-        ])
-        
-        self.pendingConnectionCompletion = nil
-        self.pendingConnectionAddress = nil
+    // Check if accessory supports our protocol
+    guard accessory.protocolStrings.contains(PROTOCOL_STRING) else {
+      DispatchQueue.main.async {
+        completion(FlutterError(code: "PROTOCOL_NOT_SUPPORTED",
+                              message: "Device does not support protocol \(self.PROTOCOL_STRING)",
+                              details: nil))
       }
+      return
     }
     
-    connectedPeripheral = peripheral
-    peripheral.delegate = self
-    centralManager.connect(peripheral, options: nil)
+    // Close any existing session
+    closeSession()
+    
+    // Create new session
+    guard let session = EASession(accessory: accessory, forProtocol: PROTOCOL_STRING) else {
+      DispatchQueue.main.async {
+        completion(FlutterError(code: "SESSION_FAILED",
+                              message: "Failed to create session with accessory",
+                              details: nil))
+      }
+      return
+    }
+    
+    // Mark as connecting
+    connectionLock.lock()
+    isConnecting = true
+    connectionLock.unlock()
+    
+    currentAccessory = accessory
+    currentSession = session
+    inputStream = session.inputStream
+    outputStream = session.outputStream
+    
+    // Start stream thread and open streams
+    startStreamThread { [weak self] success in
+      guard let self = self else { return }
+      
+      // Check if we're still trying to connect (not cancelled by disconnect)
+      self.connectionLock.lock()
+      let stillConnecting = self.isConnecting
+      self.isConnecting = false
+      self.connectionLock.unlock()
+      
+      guard stillConnecting else {
+        // Connection was cancelled, don't send success
+        return
+      }
+      
+      if success {
+        DispatchQueue.main.async {
+          completion(true)
+          
+          self.connectionHandler.send([
+            "isConnected": true,
+            "deviceAddress": String(accessory.connectionID),
+            "status": "CONNECTED"
+          ])
+        }
+      } else {
+        self.closeSession()
+        DispatchQueue.main.async {
+          completion(FlutterError(code: "CONNECTION_FAILED",
+                                message: "Failed to open streams",
+                                details: nil))
+        }
+      }
+    }
   }
   
   func disconnect(completion: @escaping FlutterResult) {
-    if let peripheral = connectedPeripheral {
-      centralManager.cancelPeripheralConnection(peripheral)
-    }
+    // Cancel any pending connection
+    connectionLock.lock()
+    isConnecting = false
+    connectionLock.unlock()
+    
+    closeSession()
+    
     DispatchQueue.main.async {
       completion(true)
     }
   }
   
   func sendData(_ data: Data, completion: @escaping FlutterResult) {
-    guard let characteristic = characteristics.first else {
+    guard let outputStream = outputStream else {
       DispatchQueue.main.async {
         completion(FlutterError(code: "NOT_CONNECTED",
-                              message: "No characteristic available",
+                              message: "Not connected",
                               details: nil))
       }
       return
     }
     
-    connectedPeripheral?.writeValue(data, for: characteristic, type: .withResponse)
-    DispatchQueue.main.async {
-      completion(true)
+    guard let runLoop = streamRunLoop else {
+      DispatchQueue.main.async {
+        completion(FlutterError(code: "NOT_CONNECTED",
+                              message: "Stream thread not running",
+                              details: nil))
+      }
+      return
+    }
+    
+    // Perform write on stream thread's RunLoop
+    runLoop.perform { [weak self] in
+      guard let self = self else { return }
+      
+      let bytes = [UInt8](data)
+      let bytesWritten = outputStream.write(bytes, maxLength: bytes.count)
+      
+      if bytesWritten < 0 {
+        DispatchQueue.main.async {
+          completion(FlutterError(code: "WRITE_ERROR",
+                                message: "Failed to write data: \(outputStream.streamError?.localizedDescription ?? "Unknown error")",
+                                details: nil))
+        }
+      } else if bytesWritten < bytes.count {
+        DispatchQueue.main.async {
+          completion(FlutterError(code: "WRITE_ERROR",
+                                message: "Only wrote \(bytesWritten) of \(bytes.count) bytes",
+                                details: nil))
+        }
+      } else {
+        DispatchQueue.main.async {
+          completion(true)
+        }
+      }
     }
   }
   
-  // MARK: - CBCentralManagerDelegate
-  func centralManagerDidUpdateState(_ central: CBCentralManager) {
-    let isEnabled = central.state == .poweredOn
-    let status: String
+  // MARK: - Private Methods - Stream Thread Management
+  
+  private func startStreamThread(completion: @escaping (Bool) -> Void) {
+    stopStreamThread()
     
-    switch central.state {
-    case .poweredOn:
-      status = "ON"
-    case .poweredOff:
-      status = "OFF"
-    case .resetting:
-      status = "RESETTING"
-    case .unauthorized:
-      status = "UNAUTHORIZED"
-    case .unsupported:
-      status = "UNSUPPORTED"
-    case .unknown:
-      status = "UNKNOWN"
-    @unknown default:
-      status = "UNKNOWN"
+    isStreamThreadRunning = true
+    
+    streamThread = Thread { [weak self] in
+      guard let self = self else {
+        completion(false)
+        return
+      }
+      
+      // Get current RunLoop
+      self.streamRunLoop = RunLoop.current
+      
+      // Configure and open streams on this thread
+      self.inputStream?.delegate = self
+      self.outputStream?.delegate = self
+      
+      self.inputStream?.schedule(in: .current, forMode: .default)
+      self.outputStream?.schedule(in: .current, forMode: .default)
+      
+      self.inputStream?.open()
+      self.outputStream?.open()
+      
+      // Notify success
+      completion(true)
+      
+      // Run the RunLoop
+      while self.isStreamThreadRunning && !Thread.current.isCancelled {
+        RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+      }
+      
+      // Clean up when exiting
+      self.inputStream?.close()
+      self.outputStream?.close()
+      self.inputStream?.remove(from: .current, forMode: .default)
+      self.outputStream?.remove(from: .current, forMode: .default)
+      self.inputStream?.delegate = nil
+      self.outputStream?.delegate = nil
+      
+      self.streamRunLoop = nil
     }
     
+    streamThread?.start()
+  }
+  
+  private func stopStreamThread() {
+    isStreamThreadRunning = false
+    streamThread?.cancel()
+    streamThread = nil
+    streamRunLoop = nil
+  }
+  
+  private func closeSession() {
+    stopStreamThread()
+    
+    currentSession = nil
+    currentAccessory = nil
+    inputStream = nil
+    outputStream = nil
+  }
+  
+  private func sendBluetoothState(isEnabled: Bool) {
+    let status = isEnabled ? "ON" : "OFF"
     stateHandler.send([
       "isEnabled": isEnabled,
       "status": status
     ])
   }
-  
-  func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
-                     advertisementData: [String : Any], rssi RSSI: NSNumber) {
-    let deviceMap: [String: Any] = [
-      "name": peripheral.name ?? "Unknown",
-      "address": peripheral.identifier.uuidString,
-      "paired": false
-    ]
-    
-    stateHandler.send([
-      "event": "deviceFound",
-      "device": deviceMap
-    ])
-  }
-  
-  func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-    // Cancel the connection timeout timer
-    connectionTimeoutTimer?.invalidate()
-    connectionTimeoutTimer = nil
-    
-    // Call the pending completion handler
-    if let pendingCompletion = pendingConnectionCompletion {
-      DispatchQueue.main.async {
-        pendingCompletion(true)
+}
+
+// MARK: - Stream Delegate
+extension ExternalAccessoryManager: StreamDelegate {
+  func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
+    switch eventCode {
+    case .openCompleted:
+      break
+      
+    case .hasBytesAvailable:
+      guard let inputStream = inputStream, aStream == inputStream else { return }
+      
+      // Read available data
+      let bytesRead = inputStream.read(readBuffer, maxLength: readBufferSize)
+      
+      if bytesRead > 0 {
+        let data = Data(bytes: readBuffer, count: bytesRead)
+        let bytes = [UInt8](data)
+        
+        if let deviceAddress = currentAccessory?.connectionID {
+          dataHandler.send([
+            "deviceAddress": String(deviceAddress),
+            "data": bytes.map { Int($0) }
+          ])
+        }
       }
-      pendingConnectionCompletion = nil
-      pendingConnectionAddress = nil
-    }
-    
-    peripheral.discoverServices(nil)
-    
-    connectionHandler.send([
-      "isConnected": true,
-      "deviceAddress": peripheral.identifier.uuidString,
-      "status": "CONNECTED"
-    ])
-  }
-  
-  func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-    // Cancel the connection timeout timer
-    connectionTimeoutTimer?.invalidate()
-    connectionTimeoutTimer = nil
-    
-    let errorMessage = error?.localizedDescription ?? "Unknown error"
-    
-    // Call the pending completion handler with error
-    if let pendingCompletion = pendingConnectionCompletion {
-      DispatchQueue.main.async {
-        pendingCompletion(FlutterError(code: "CONNECTION_FAILED",
-                                      message: "Failed to connect: \(errorMessage)",
-                                      details: nil))
+      
+    case .hasSpaceAvailable:
+      break
+      
+    case .errorOccurred:
+      if let accessory = currentAccessory {
+        connectionHandler.send([
+          "isConnected": false,
+          "deviceAddress": String(accessory.connectionID),
+          "status": "ERROR: \(aStream.streamError?.localizedDescription ?? "Unknown error")"
+        ])
       }
-      pendingConnectionCompletion = nil
-      pendingConnectionAddress = nil
-    }
-    
-    // Send connection error event
-    connectionHandler.send([
-      "isConnected": false,
-      "deviceAddress": peripheral.identifier.uuidString,
-      "status": "ERROR: \(errorMessage)"
-    ])
-  }
-  
-  func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-    connectionHandler.send([
-      "isConnected": false,
-      "deviceAddress": peripheral.identifier.uuidString,
-      "status": "DISCONNECTED"
-    ])
-  }
-  
-  // MARK: - CBPeripheralDelegate
-  func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
-    peripheral.services?.forEach { service in
-      peripheral.discoverCharacteristics(nil, for: service)
-    }
-  }
-  
-  func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
-    if let characteristics = service.characteristics {
-      self.characteristics.append(contentsOf: characteristics)
-      characteristics.forEach { characteristic in
-        peripheral.setNotifyValue(true, for: characteristic)
+      closeSession()
+      
+    case .endEncountered:
+      if let accessory = currentAccessory {
+        connectionHandler.send([
+          "isConnected": false,
+          "deviceAddress": String(accessory.connectionID),
+          "status": "DISCONNECTED"
+        ])
       }
-    }
-  }
-  
-  func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-    if let data = characteristic.value {
-      let bytes = [UInt8](data)
-      dataHandler.send([
-        "deviceAddress": peripheral.identifier.uuidString,
-        "data": bytes.map { Int($0) }
-      ])
+      closeSession()
+      
+    default:
+      break
     }
   }
 }

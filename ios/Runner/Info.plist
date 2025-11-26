@@ -45,5 +45,13 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UISupportedExternalAccessoryProtocols</key>
+	<array>
+		<string>Tigaro.com</string>
+	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>This app needs Bluetooth to communicate with external devices (Labdisc, MiniDisc, DataHub, Forceacc)</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>This app needs Bluetooth to communicate with external devices (Labdisc, MiniDisc, DataHub, Forceacc)</string>
 </dict>
 </plist>
