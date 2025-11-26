@@ -169,8 +169,9 @@ class BluetoothDataStreamHandler: NSObject, FlutterStreamHandler {
 
 // MARK: - External Accessory Manager
 class ExternalAccessoryManager: NSObject {
-  // Protocol string for MFi accessories
-  private let PROTOCOL_STRING = "Tigaro.com"
+  // Protocol substring for MFi accessories (legacy code checks for "igaro" in protocol string)
+  // See EAConnectionController.m line 117 in legacy implementation
+  private let PROTOCOL_SUBSTRING = "igaro"
   
   // Supported device name prefixes (case-insensitive)
   private let SUPPORTED_DEVICES = ["labdisc", "minidisc", "datahub", "forceacc"]
@@ -278,6 +279,22 @@ class ExternalAccessoryManager: NSObject {
     }
   }
   
+  // MARK: - Helper Methods
+  
+  /// Finds a supported protocol string from an accessory's protocol list
+  /// Matches legacy implementation that searches for "igaro" substring (EAConnectionController.m:117)
+  private func findSupportedProtocol(for accessory: EAAccessory) -> String? {
+    for protocolString in accessory.protocolStrings {
+      // Use case-insensitive search for protocol substring
+      if protocolString.lowercased().contains(PROTOCOL_SUBSTRING.lowercased()) {
+        print("[ExternalAccessory] Found supported protocol: \(protocolString) for accessory: \(accessory.name)")
+        return protocolString
+      }
+    }
+    print("[ExternalAccessory] No supported protocol found for accessory: \(accessory.name), available protocols: \(accessory.protocolStrings)")
+    return nil
+  }
+  
   // MARK: - Public Methods
   
   func getPairedDevices(completion: @escaping FlutterResult) {
@@ -309,11 +326,17 @@ class ExternalAccessoryManager: NSObject {
     
     // First, send events for all currently connected supported devices
     let accessories = EAAccessoryManager.shared().connectedAccessories
+    print("[ExternalAccessory] Starting discovery, found \(accessories.count) connected accessories")
+    
     for accessory in accessories {
+      print("[ExternalAccessory] Accessory: \(accessory.name), serial: \(accessory.serialNumber)")
+      print("[ExternalAccessory] Protocols: \(accessory.protocolStrings)")
+      
       let deviceName = accessory.name.lowercased()
       let isSupported = SUPPORTED_DEVICES.contains { deviceName.contains($0) }
       
       if isSupported {
+        print("[ExternalAccessory] Device \(accessory.name) is supported")
         let deviceMap: [String: Any] = [
           "name": accessory.name,
           "address": String(accessory.connectionID),
@@ -362,6 +385,9 @@ class ExternalAccessoryManager: NSObject {
     }
     
     let accessories = EAAccessoryManager.shared().connectedAccessories
+    print("[ExternalAccessory] Attempting to connect to device with ID: \(connectionID)")
+    print("[ExternalAccessory] Available accessories: \(accessories.count)")
+    
     guard let accessory = accessories.first(where: { $0.connectionID == connectionID }) else {
       DispatchQueue.main.async {
         completion(FlutterError(code: "DEVICE_NOT_FOUND",
@@ -371,24 +397,28 @@ class ExternalAccessoryManager: NSObject {
       return
     }
     
-    // Check if accessory supports our protocol
-    guard accessory.protocolStrings.contains(PROTOCOL_STRING) else {
+    print("[ExternalAccessory] Found accessory: \(accessory.name), protocols: \(accessory.protocolStrings)")
+    
+    // Find a supported protocol (flexible matching like legacy code)
+    guard let protocolString = findSupportedProtocol(for: accessory) else {
       DispatchQueue.main.async {
         completion(FlutterError(code: "PROTOCOL_NOT_SUPPORTED",
-                              message: "Device does not support protocol \(self.PROTOCOL_STRING)",
+                              message: "Device does not support any protocol containing '\(self.PROTOCOL_SUBSTRING)'. Available protocols: \(accessory.protocolStrings)",
                               details: nil))
       }
       return
     }
     
+    print("[ExternalAccessory] Using protocol: \(protocolString)")
+    
     // Close any existing session
     closeSession()
     
-    // Create new session
-    guard let session = EASession(accessory: accessory, forProtocol: PROTOCOL_STRING) else {
+    // Create new session with the detected protocol
+    guard let session = EASession(accessory: accessory, forProtocol: protocolString) else {
       DispatchQueue.main.async {
         completion(FlutterError(code: "SESSION_FAILED",
-                              message: "Failed to create session with accessory",
+                              message: "Failed to create session with accessory using protocol: \(protocolString)",
                               details: nil))
       }
       return
