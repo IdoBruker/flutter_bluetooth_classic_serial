@@ -27,7 +27,7 @@ flutter:
         package: com.example.flutter_bluetooth_classic
         pluginClass: FlutterBluetoothClassicPlugin
       ios:
-        pluginClass: FlutterBluetoothClassicPlugin
+        pluginClass: SwiftFlutterBluetoothClassicPlugin
       windows:
         pluginClass: FlutterBluetoothClassicPlugin
         fileName: flutter_bluetooth_classic_plugin.cpp
