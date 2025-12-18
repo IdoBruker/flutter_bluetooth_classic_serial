@@ -19,7 +19,7 @@ abstract class FlutterBluetoothClassicPlatform extends PlatformInterface {
   // State streams
   Stream<Map<String, dynamic>> get stateStream;
   Stream<Map<String, dynamic>> get connectionStream;
-  Stream<List<int>> get dataStream;
+  Stream<Map<String, dynamic>> get dataStream;
 
   // Methods
   Future<bool> isBluetoothSupported();
@@ -54,8 +54,8 @@ class _DefaultPlatform extends FlutterBluetoothClassicPlatform {
       _connectionChannel.receiveBroadcastStream().cast<Map<String, dynamic>>();
 
   @override
-  Stream<List<int>> get dataStream =>
-      _dataChannel.receiveBroadcastStream().cast<List<int>>();
+  Stream<Map<String, dynamic>> get dataStream =>
+      _dataChannel.receiveBroadcastStream().cast<Map<String, dynamic>>();
 
   @override
   Future<bool> isBluetoothSupported() async {

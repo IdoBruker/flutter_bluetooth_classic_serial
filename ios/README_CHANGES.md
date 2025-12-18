@@ -37,9 +37,14 @@ Log prefix: `[ExternalAccessory]` for easy filtering
 
 ### 4. ✅ Created Documentation
 
-**Created:** `ios/ENTITLEMENTS_SETUP.md`
+**Created Multiple Guides:**
 
-Comprehensive guide covering:
+- `ios/DEPENDENCY_SETUP.md` (English) - **For users of this plugin**
+- `ios/DEPENDENCY_SETUP_HE.md` (Hebrew) - **For users of this plugin**
+- `ios/ENTITLEMENTS_SETUP.md` (English) - For plugin developers
+- `ios/SETUP_INSTRUCTIONS_HE.md` (Hebrew) - For plugin developers
+
+Guides cover:
 
 - Why entitlements are required
 - Step-by-step Xcode setup instructions
@@ -49,23 +54,37 @@ Comprehensive guide covering:
 
 ## What You Need to Do Next
 
-### ⚠️ IMPORTANT: Link Entitlements in Xcode
+### ⚠️ IMPORTANT: Setup Instructions
 
-The entitlements files have been created, but **you must link them in Xcode**:
+**Choose the guide that matches your use case:**
 
-#### For the Plugin:
+#### If You're Using This as a Dependency in Your Flutter App:
+
+📘 **See:** `ios/DEPENDENCY_SETUP.md` (English) or `ios/DEPENDENCY_SETUP_HE.md` (Hebrew)
+
+You need to add entitlements to **YOUR app's iOS project**, not to this plugin. The setup involves:
+
+1. Creating `Runner.entitlements` in your app's `ios/Runner/` folder
+2. Updating your app's `Info.plist`
+3. Linking the entitlements in Xcode for your app's target
+
+#### If You're Developing This Plugin Directly:
+
+📘 **See:** `ios/ENTITLEMENTS_SETUP.md` (English) or `ios/SETUP_INSTRUCTIONS_HE.md` (Hebrew)
+
+**For the Plugin:**
 
 1. Open `ios/Runner.xcworkspace` in Xcode
 2. Select the **Runner** target
 3. Go to **Signing & Capabilities** tab
-4. Verify entitlements are linked (see detailed steps in `ios/ENTITLEMENTS_SETUP.md`)
+4. Add "External Accessory Communication" capability
 
-#### For the Example App:
+**For the Example App:**
 
 1. Open `example/ios/Runner.xcworkspace` in Xcode
 2. Select the **Runner** target
 3. Go to **Signing & Capabilities** tab
-4. Link the entitlements file
+4. Add "External Accessory Communication" capability
 
 ### Testing
 

@@ -34,7 +34,7 @@ class BluetoothService {
   static Stream<Map<String, dynamic>> get stateStream => _platform.stateStream;
   static Stream<Map<String, dynamic>> get connectionStream =>
       _platform.connectionStream;
-  static Stream<List<int>> get dataStream => _platform.dataStream;
+  static Stream<Map<String, dynamic>> get dataStream => _platform.dataStream;
 
   static Future<bool> isBluetoothSupported() async {
     try {

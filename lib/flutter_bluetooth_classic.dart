@@ -1,18 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
-import 'package:flutter/services.dart';
+import 'flutter_bluetooth_classic_platform_interface.dart';
 
 class FlutterBluetoothClassic {
-  static const MethodChannel _channel = MethodChannel(
-      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic');
-  static const EventChannel _stateChannel = EventChannel(
-      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_state');
-  static const EventChannel _connectionChannel = EventChannel(
-      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_connection');
-  static const EventChannel _dataChannel = EventChannel(
-      'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_data');
-
   // Singleton instance
   static FlutterBluetoothClassic? _instance;
 
@@ -43,10 +35,11 @@ class FlutterBluetoothClassic {
   /// Private constructor that sets up the event listeners
   FlutterBluetoothClassic._(String appName) {
     _appName = appName;
-    // Listen for state changes and device discovery events
-    _stateChannel.receiveBroadcastStream().listen((dynamic event) {
+    
+    // Listen for state changes
+    FlutterBluetoothClassicPlatform.instance.stateStream.listen((event) {
       // Check if this is a special event (deviceFound, permissionResult, etc.)
-      if (event is Map && event.containsKey('event')) {
+      if (event.containsKey('event')) {
         final String eventType = event['event'];
 
         if (eventType == 'deviceFound') {
@@ -65,12 +58,12 @@ class FlutterBluetoothClassic {
     });
 
     // Listen for connection changes
-    _connectionChannel.receiveBroadcastStream().listen((dynamic event) {
+    FlutterBluetoothClassicPlatform.instance.connectionStream.listen((event) {
       _connectionStreamController.add(BluetoothConnectionState.fromMap(event));
     });
 
     // Listen for data received
-    _dataChannel.receiveBroadcastStream().listen((dynamic event) {
+    FlutterBluetoothClassicPlatform.instance.dataStream.listen((event) {
       _dataStreamController.add(BluetoothData.fromMap(event));
     });
   }
@@ -78,7 +71,7 @@ class FlutterBluetoothClassic {
   /// Check if Bluetooth is supported on the device
   Future<bool> isBluetoothSupported() async {
     try {
-      return await _channel.invokeMethod('isBluetoothSupported');
+      return await FlutterBluetoothClassicPlatform.instance.isBluetoothSupported();
     } catch (e) {
       throw BluetoothException('Failed to check Bluetooth support: $e');
     }
@@ -87,7 +80,7 @@ class FlutterBluetoothClassic {
   /// Check if Bluetooth is enabled
   Future<bool> isBluetoothEnabled() async {
     try {
-      return await _channel.invokeMethod('isBluetoothEnabled');
+      return await FlutterBluetoothClassicPlatform.instance.isBluetoothEnabled();
     } catch (e) {
       throw BluetoothException('Failed to check Bluetooth status: $e');
     }
@@ -96,7 +89,7 @@ class FlutterBluetoothClassic {
   /// Request to enable Bluetooth
   Future<bool> enableBluetooth() async {
     try {
-      return await _channel.invokeMethod('enableBluetooth');
+      return await FlutterBluetoothClassicPlatform.instance.enableBluetooth();
     } catch (e) {
       throw BluetoothException('Failed to enable Bluetooth: $e');
     }
@@ -105,8 +98,8 @@ class FlutterBluetoothClassic {
   /// Get paired devices
   Future<List<BluetoothDevice>> getPairedDevices() async {
     try {
-      final List<dynamic> devices =
-          await _channel.invokeMethod('getPairedDevices');
+      final List<Map<String, dynamic>> devices =
+          await FlutterBluetoothClassicPlatform.instance.getPairedDevices();
       return devices.map((device) => BluetoothDevice.fromMap(device)).toList();
     } catch (e) {
       throw BluetoothException('Failed to get paired devices: $e');
@@ -116,7 +109,7 @@ class FlutterBluetoothClassic {
   /// Start discovery for nearby Bluetooth devices
   Future<bool> startDiscovery() async {
     try {
-      return await _channel.invokeMethod('startDiscovery');
+      return await FlutterBluetoothClassicPlatform.instance.startDiscovery();
     } catch (e) {
       throw BluetoothException('Failed to start discovery: $e');
     }
@@ -125,7 +118,7 @@ class FlutterBluetoothClassic {
   /// Stop discovery
   Future<bool> stopDiscovery() async {
     try {
-      return await _channel.invokeMethod('stopDiscovery');
+      return await FlutterBluetoothClassicPlatform.instance.stopDiscovery();
     } catch (e) {
       throw BluetoothException('Failed to stop discovery: $e');
     }
@@ -134,7 +127,7 @@ class FlutterBluetoothClassic {
   /// Connect to a device
   Future<bool> connect(String address) async {
     try {
-      return await _channel.invokeMethod('connect', {'address': address});
+      return await FlutterBluetoothClassicPlatform.instance.connect(address);
     } catch (e) {
       throw BluetoothException('Failed to connect to device: $e');
     }
@@ -142,7 +135,7 @@ class FlutterBluetoothClassic {
 
   Future<bool> listen() async {
     try {
-      return await _channel.invokeMethod('listen', {'appName': _appName});
+      return await FlutterBluetoothClassicPlatform.instance.listen();
     } catch (e) {
       throw BluetoothException('Failed to listen for incoming connections: $e');
     }
@@ -150,7 +143,7 @@ class FlutterBluetoothClassic {
 
   Future<bool> stopListen() async {
     try {
-      return await _channel.invokeMethod('stopListen');
+      return await FlutterBluetoothClassicPlatform.instance.stopListen();
     } catch (e) {
       throw BluetoothException('Failed to stop bluetooth server: $e');
     }
@@ -159,7 +152,7 @@ class FlutterBluetoothClassic {
   /// Disconnect from a device
   Future<bool> disconnect() async {
     try {
-      return await _channel.invokeMethod('disconnect');
+      return await FlutterBluetoothClassicPlatform.instance.disconnect();
     } catch (e) {
       throw BluetoothException('Failed to disconnect: $e');
     }
@@ -168,7 +161,7 @@ class FlutterBluetoothClassic {
   /// Send data to the connected device
   Future<bool> sendData(Uint8List data) async {
     try {
-      return await _channel.invokeMethod('sendData', {'data': data});
+      return await FlutterBluetoothClassicPlatform.instance.sendData(data);
     } catch (e) {
       throw BluetoothException('Failed to send data: $e');
     }
