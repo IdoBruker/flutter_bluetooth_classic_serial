@@ -4,278 +4,310 @@ import 'dart:typed_data';
 
 import 'package:flutter_bluetooth_classic_serial/flutter_bluetooth_classic_platform_interface.dart';
 import 'package:flutter_web_plugins/flutter_web_plugins.dart';
-import 'package:web/web.dart' as web;
 
-// --- Web Bluetooth API Definitions ---
-// Since package:web doesn't fully support Web Bluetooth yet, we define the interop types here.
+// --- Web Serial API Definitions ---
+// For Bluetooth Classic devices using Serial Port Profile (SPP)
 
-extension type BluetoothNavigator(web.Navigator navigator) implements JSObject {
-  @JS('bluetooth')
-  external Bluetooth? get bluetooth;
+@JS('navigator.serial')
+external Serial get serial;
+
+@JS()
+extension type Serial._(JSObject _) implements JSObject {
+  external JSPromise<SerialPort> requestPort([JSSerialOptions? options]);
+  external JSPromise<JSArray<SerialPort>> getPorts();
 }
 
-@JS('Bluetooth')
-extension type Bluetooth._(JSObject _) implements JSObject {
-  external JSPromise<JSBoolean> getAvailability();
-  external JSPromise<BluetoothDevice> requestDevice(RequestDeviceOptions options);
+@JS()
+extension type SerialPort._(JSObject _) implements JSObject {
+  external JSPromise<JSAny> open(JSSerialOptions options);
+  external JSPromise<JSAny> close();
+  external SerialPortReadable get readable;
+  external SerialPortWritable get writable;
+  external bool get connected;
+  external JSFunction? get ondisconnect;
+  external set ondisconnect(JSFunction? value);
 }
 
 @JS()
 @anonymous
-extension type RequestDeviceOptions._(JSObject _) implements JSObject {
-  external factory RequestDeviceOptions({
-    JSArray<BluetoothLEScanFilter>? filters,
-    JSArray<JSString>? optionalServices,
-    JSBoolean? acceptAllDevices,
+extension type JSSerialOptions._(JSObject _) implements JSObject {
+  external factory JSSerialOptions({
+    JSArray<JSObject>? filters,
+    int? baudRate,
   });
 }
 
 @JS()
-@anonymous
-extension type BluetoothLEScanFilter._(JSObject _) implements JSObject {
-  external factory BluetoothLEScanFilter({
-    JSArray<JSString>? services,
-    JSString? name,
-    JSString? namePrefix,
-  });
+extension type SerialPortReadable._(JSObject _) implements JSObject {
+  external SerialReader getReader();
 }
 
-@JS('BluetoothDevice')
-extension type BluetoothDevice._(JSObject _) implements JSObject {
-  external String get id;
-  external String? get name;
-  external BluetoothRemoteGATTServer? get gatt;
+@JS()
+extension type SerialReader._(JSObject _) implements JSObject {
+  external JSPromise<JSSerialReadResult> read();
+  external void releaseLock();
 }
 
-@JS('BluetoothRemoteGATTServer')
-extension type BluetoothRemoteGATTServer._(JSObject _) implements JSObject {
-  external BluetoothDevice get device;
-  external JSBoolean get connected;
-  external JSPromise<BluetoothRemoteGATTServer> connect();
-  external void disconnect();
-  external JSPromise<BluetoothRemoteGATTService> getPrimaryService(JSAny service);
+@JS()
+extension type JSSerialReadResult._(JSObject _) implements JSObject {
+  external JSUint8Array? get value;
+  external bool get done;
 }
 
-@JS('BluetoothRemoteGATTService')
-extension type BluetoothRemoteGATTService._(JSObject _) implements JSObject {
-  external String get uuid;
-  external JSBoolean get isPrimary;
-  external JSPromise<BluetoothRemoteGATTCharacteristic> getCharacteristic(JSAny characteristic);
+@JS()
+extension type SerialPortWritable._(JSObject _) implements JSObject {
+  external SerialWriter getWriter();
 }
 
-@JS('BluetoothRemoteGATTCharacteristic')
-extension type BluetoothRemoteGATTCharacteristic._(JSObject _) implements JSObject {
-  external String get uuid;
-  external BluetoothRemoteGATTService get service;
-  external JSDataView? get value; 
-  external JSPromise<BluetoothRemoteGATTCharacteristic> startNotifications();
-  external JSPromise<JSAny?> readValue();
-  external JSPromise<JSAny?> writeValue(JSAny value);
-  external void addEventListener(String type, JSFunction listener);
-  external void removeEventListener(String type, JSFunction listener);
+@JS()
+extension type SerialWriter._(JSObject _) implements JSObject {
+  external JSPromise<JSAny> write(JSUint8Array data);
+  external void releaseLock();
 }
 
-// --- End Web Bluetooth API Definitions ---
+// --- End Web Serial API Definitions ---
 
 class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
   static void registerWith(Registrar registrar) {
     FlutterBluetoothClassicPlatform.instance = FlutterBluetoothClassicWeb();
   }
 
-  // UUIDs for Nordic UART Service (NUS) - Standard for Serial over BLE
-  static const String _uartServiceUuid = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-  static const String _uartRxCharacteristicUuid = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // Notify
-  static const String _uartTxCharacteristicUuid = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // Write
-
   // State controllers
   final _stateController = StreamController<Map<String, dynamic>>.broadcast();
-  final _connectionController = StreamController<Map<String, dynamic>>.broadcast();
+  final _connectionController =
+      StreamController<Map<String, dynamic>>.broadcast();
   final _dataController = StreamController<Map<String, dynamic>>.broadcast();
 
-  // Connected device reference
-  BluetoothDevice? _connectedDevice;
-  BluetoothRemoteGATTCharacteristic? _txCharacteristic;
-  BluetoothRemoteGATTCharacteristic? _rxCharacteristic;
-  JSFunction? _rxListener;
-  JSFunction? _disconnectListener;
+  // Serial port references
+  SerialPort? _port;
+  SerialReader? _reader;
+  SerialWriter? _writer;
+  bool _isReading = false;
 
-  // Storage for discovered devices (Web Bluetooth device objects)
-  final Map<String, BluetoothDevice> _discoveredDevices = {};
+  // Storage for discovered ports (Web Serial port objects)
+  final Map<String, SerialPort> _discoveredPorts = {};
+
+  void _cleanup() {
+    _isReading = false;
+
+    if (_reader != null) {
+      _reader!.releaseLock();
+      _reader = null;
+    }
+
+    if (_writer != null) {
+      _writer!.releaseLock();
+      _writer = null;
+    }
+
+    _port = null;
+  }
+
+  void _startReading(String deviceAddress) async {
+    if (_port == null) return;
+
+    _isReading = true;
+
+    try {
+      while (_port!.readable != null && _isReading) {
+        _reader = _port!.readable.getReader();
+
+        while (true) {
+          final result = await _reader!.read().toDart;
+
+          if (result.done) {
+            // Reader has been canceled
+            _reader!.releaseLock();
+            break;
+          }
+
+          if (result.value != null) {
+            // Convert JS Uint8Array to Dart Uint8List
+            final data = result.value!.toDart;
+
+            _dataController.add({
+              "deviceAddress": deviceAddress,
+              "data": data.toList() // Convert to List<int>
+            });
+          }
+        }
+      }
+    } catch (e) {
+      print("Serial read error: $e");
+
+      // Send connection error event if reading fails
+      _connectionController.add({
+        "isConnected": false,
+        "deviceAddress": deviceAddress,
+        "status": "ERROR: Read failed - $e"
+      });
+
+      // Cleanup on read error
+      _cleanup();
+    }
+  }
 
   @override
   Stream<Map<String, dynamic>> get stateStream => _stateController.stream;
 
   @override
-  Stream<Map<String, dynamic>> get connectionStream => _connectionController.stream;
+  Stream<Map<String, dynamic>> get connectionStream =>
+      _connectionController.stream;
 
   @override
   Stream<Map<String, dynamic>> get dataStream => _dataController.stream;
 
-  Bluetooth? get _bluetooth => BluetoothNavigator(web.window.navigator).bluetooth;
-
   @override
   Future<bool> isBluetoothSupported() async {
-    return _bluetooth != null;
-  }
-
-  @override
-  Future<bool> isBluetoothEnabled() async {
-    if (_bluetooth == null) return false;
+    // Check if Web Serial API is available
     try {
-      final availability = await _bluetooth!.getAvailability().toDart;
-      return availability.toDart;
+      // This will throw if serial is not available
+      final _ = serial;
+
+      // Send initial state event (Web Serial is "available" if supported)
+      _stateController.add({"isEnabled": true, "status": "AVAILABLE"});
+
+      return true;
     } catch (e) {
+      // Send state event indicating Web Serial is not available
+      _stateController.add({"isEnabled": false, "status": "NOT_SUPPORTED"});
+
       return false;
     }
   }
 
   @override
+  Future<bool> isBluetoothEnabled() async {
+    // Web Serial API doesn't have an "enabled" check like Bluetooth
+    // For web, "enabled" means "supported and available"
+    final isSupported = await isBluetoothSupported();
+
+    // Send state event
+    _stateController.add({
+      "isEnabled": isSupported,
+      "status": isSupported ? "AVAILABLE" : "NOT_SUPPORTED"
+    });
+
+    return isSupported;
+  }
+
+  @override
   Future<bool> enableBluetooth() async {
-    // Web cannot programmatically enable Bluetooth
+    // Web cannot programmatically enable Serial access
     return await isBluetoothEnabled();
   }
 
   @override
   Future<List<Map<String, dynamic>>> getPairedDevices() async {
-    // Web Bluetooth doesn't expose a list of paired devices without user interaction
-    // We can only return the currently connected device if any
-    if (_connectedDevice != null && _connectedDevice!.gatt?.connected.toDart == true) {
-      return [
-        {
-          "name": _connectedDevice!.name ?? "Unknown",
-          "address": _connectedDevice!.id,
+    try {
+      // Get already granted serial ports (previously paired Bluetooth Classic devices)
+      final ports = await serial.getPorts().toDart;
+
+      final devices = <Map<String, dynamic>>[];
+      for (int i = 0; i < ports.length; i++) {
+        final port = ports[i];
+        // For Web Serial, we don't have direct access to device names
+        // The ports are already granted access, so they're "paired"
+        devices.add({
+          "name": "Bluetooth Serial Device ${i + 1}",
+          "address":
+              "serial_port_$i", // Use index as identifier since we don't have hardware address
           "paired": true
-        }
-      ];
+        });
+
+        // Store the port for later connection
+        _discoveredPorts["serial_port_$i"] = port;
+      }
+
+      return devices;
+    } catch (e) {
+      print("Error getting paired serial ports: $e");
+      return [];
     }
-    return [];
   }
 
   @override
   Future<bool> startDiscovery() async {
-    if (_bluetooth == null) return false;
-
     try {
-      final options = RequestDeviceOptions(
-        filters: [
-          BluetoothLEScanFilter(services: [_uartServiceUuid.toJS].toJS)
-        ].toJS,
-        optionalServices: [_uartServiceUuid.toJS].toJS,
-      );
+      // Request a serial port (this will show a picker for available serial ports)
+      // Bluetooth Classic devices using SPP will appear as serial ports
+      final port = await serial.requestPort(null).toDart;
 
-      final device = await _bluetooth!.requestDevice(options).toDart;
-      
-      _discoveredDevices[device.id] = device;
+      // Generate a unique identifier for this port
+      final portId = "serial_port_${DateTime.now().millisecondsSinceEpoch}";
 
+      _discoveredPorts[portId] = port;
+
+      // Send device found event first
       _stateController.add({
         "event": "deviceFound",
         "device": {
-          "name": device.name ?? "Unknown",
-          "address": device.id,
-          "paired": false
+          "name":
+              "Bluetooth Classic Device", // Web Serial doesn't provide device names
+          "address": portId,
+          "paired":
+              true // Ports requested via requestPort() are implicitly granted access
         }
       });
 
+      // On web, immediately attempt to connect to the selected device
+      // Start connection asynchronously (don't await) so discovery returns immediately
+      unawaited(connect(portId));
+
       return true;
     } catch (e) {
-      print("Web Bluetooth discovery error: $e");
+      print("Web Serial discovery error: $e");
       return false;
     }
   }
 
   @override
   Future<bool> stopDiscovery() async {
-    // Web Bluetooth discovery stops as soon as the picker is closed/device selected
+    // Web Serial discovery stops as soon as the picker is closed/port selected
     return true;
   }
 
   @override
   Future<bool> connect(String address) async {
-    final device = _discoveredDevices[address];
-    if (device == null) {
-      print("Device not found in cache. Must call startDiscovery first on Web.");
+    final port = _discoveredPorts[address];
+    if (port == null) {
+      print(
+          "Serial port not found in cache. Must call startDiscovery or getPairedDevices first on Web.");
       return false;
     }
 
     try {
-      // Connect to GATT
-      if (device.gatt == null) return false;
-      
-      // Note: connect() is usually on the GATT server
-      final server = await device.gatt!.connect().toDart;
-      _connectedDevice = device;
+      // Open the serial port with appropriate options for Bluetooth Classic
+      // Baud rate is required by the API but Bluetooth Classic ignores it
+      await port.open(JSSerialOptions(baudRate: 9600)).toDart;
 
-      // Get Service
-      final service = await server.getPrimaryService(_uartServiceUuid.toJS).toDart;
-
-      // Get Characteristics
-      _txCharacteristic = await service.getCharacteristic(_uartTxCharacteristicUuid.toJS).toDart;
-      _rxCharacteristic = await service.getCharacteristic(_uartRxCharacteristicUuid.toJS).toDart;
-
-      // Start Notifications for RX
-      if (_rxCharacteristic != null) {
-        await _rxCharacteristic!.startNotifications().toDart;
-        
-        _rxListener = ((JSObject e) {
-           final target = e.getProperty('target'.toJS) as BluetoothRemoteGATTCharacteristic;
-           final value = target.value;
-           
-           if (value != null) {
-             final data = Uint8List(value.byteLength.toDartInt);
-             for(int i=0; i<value.byteLength.toDartInt; i++) {
-               data[i] = value.getUint8(i.toJS).toDartInt;
-             }
-             
-             _dataController.add({
-               "deviceAddress": device.id,
-               "data": data.toList() // Convert to List<int>
-             });
-           }
-        }).toJS;
-
-        _rxCharacteristic!.addEventListener('characteristicvaluechanged', _rxListener!);
-      }
+      _port = port;
 
       // Notify connection success
       _connectionController.add({
         "isConnected": true,
-        "deviceAddress": device.id,
+        "deviceAddress": address,
         "status": "CONNECTED"
       });
-      
-      // Handle disconnection
-      _disconnectListener = ((JSObject e) {
+
+      // Set up disconnect handler
+      port.ondisconnect = ((JSObject e) {
         _connectionController.add({
           "isConnected": false,
-          "deviceAddress": device.id,
+          "deviceAddress": address,
           "status": "DISCONNECTED"
         });
-        
-        // Cleanup listeners
-        if (_rxCharacteristic != null && _rxListener != null) {
-           _rxCharacteristic!.removeEventListener('characteristicvaluechanged', _rxListener!);
-        }
-        if (_connectedDevice != null && _disconnectListener != null) {
-           // device.removeEventListener('gattserverdisconnected', _disconnectListener!);
-           // Note: BluetoothDevice inherits from EventTarget, need to add addEventListener to BluetoothDevice definition if needed
-           // For now assuming we bound it to something that works or using the event stream provider if available
-           // Since I removed EventStreamProviders usage to rely on direct addEventListener, I need to add it to BluetoothDevice definition too.
-        }
 
-        _connectedDevice = null;
-        _txCharacteristic = null;
-        _rxCharacteristic = null;
-        _rxListener = null;
-        _disconnectListener = null;
+        // Cleanup
+        _cleanup();
       }).toJS;
 
-      // Add listener to device
-      // Casting to JSAny to call addEventListener because I didn't add it to BluetoothDevice interface yet
-      (device as JSObject).callMethod('addEventListener'.toJS, 'gattserverdisconnected'.toJS, _disconnectListener!);
+      // Start reading data
+      _startReading(address);
 
       return true;
     } catch (e) {
-      print("Web connection error: $e");
+      print("Web Serial connection error: $e");
       _connectionController.add({
         "isConnected": false,
         "deviceAddress": address,
@@ -287,50 +319,52 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
 
   @override
   Future<bool> listen() async {
-    // Web cannot act as a server
-    return false; 
+    // Web Serial API cannot act as a Bluetooth server/listener
+    // This is a limitation of the Web Serial API
+    return false;
   }
 
   @override
   Future<bool> stopListen() async {
+    // No listening was started, so nothing to stop
     return true;
   }
 
   @override
   Future<bool> disconnect() async {
-    if (_connectedDevice != null && _connectedDevice!.gatt != null) {
-      _connectedDevice!.gatt!.disconnect();
-      return true;
+    if (_port != null) {
+      try {
+        await _port!.close().toDart;
+        _cleanup();
+        return true;
+      } catch (e) {
+        print("Error closing serial port: $e");
+        _cleanup();
+        return false;
+      }
     }
     return false;
   }
 
   @override
   Future<bool> sendData(Uint8List data) async {
-    if (_txCharacteristic == null) return false;
+    if (_port == null) return false;
+
     try {
-      // writeValue expects a BufferSource (ArrayBuffer or ArrayBufferView)
-      // Uint8List is a view, so it should work or might need conversion
-      await _txCharacteristic!.writeValue(data.toJS).toDart;
+      // Get writer and write data
+      _writer = _port!.writable.getWriter();
+      await _writer!.write(data.toJS).toDart;
+      _writer!.releaseLock();
+      _writer = null;
+
       return true;
     } catch (e) {
-      print("Error sending data: $e");
+      print("Error sending serial data: $e");
+      if (_writer != null) {
+        _writer!.releaseLock();
+        _writer = null;
+      }
       return false;
     }
   }
-}
-
-extension on JSObject {
-  JSAny? getProperty(JSAny key) => (this as JSAny).getProperty(key);
-  JSAny? callMethod(JSAny method, [JSAny? arg1, JSAny? arg2]) => (this as JSAny).callMethod(method, arg1, arg2);
-}
-
-extension on JSAny {
-  external JSAny? getProperty(JSAny key);
-  external JSAny? callMethod(JSAny method, [JSAny? arg1, JSAny? arg2]);
-}
-
-extension on JSDataView {
-   external JSNumber get byteLength;
-   external JSNumber getUint8(JSNumber byteOffset);
 }

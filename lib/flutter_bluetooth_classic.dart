@@ -35,7 +35,7 @@ class FlutterBluetoothClassic {
   /// Private constructor that sets up the event listeners
   FlutterBluetoothClassic._(String appName) {
     _appName = appName;
-    
+
     // Listen for state changes
     FlutterBluetoothClassicPlatform.instance.stateStream.listen((event) {
       // Check if this is a special event (deviceFound, permissionResult, etc.)
@@ -49,6 +49,14 @@ class FlutterBluetoothClassic {
             final device = BluetoothDevice.fromMap(deviceMap);
             _discoveredDevicesController.add(device);
           }
+        } else if (eventType == 'discoveryError') {
+          // Handle discovery errors (e.g., web user gesture requirement)
+          // For now, we can add this as a state change or handle it in the future
+          // Create a state object with error information
+          _stateStreamController.add(BluetoothState(
+            isEnabled: false,
+            status: 'ERROR: ${event['error'] ?? 'Unknown error'}',
+          ));
         }
         // Other event types can be handled here if needed
       } else {
@@ -71,7 +79,8 @@ class FlutterBluetoothClassic {
   /// Check if Bluetooth is supported on the device
   Future<bool> isBluetoothSupported() async {
     try {
-      return await FlutterBluetoothClassicPlatform.instance.isBluetoothSupported();
+      return await FlutterBluetoothClassicPlatform.instance
+          .isBluetoothSupported();
     } catch (e) {
       throw BluetoothException('Failed to check Bluetooth support: $e');
     }
@@ -80,7 +89,8 @@ class FlutterBluetoothClassic {
   /// Check if Bluetooth is enabled
   Future<bool> isBluetoothEnabled() async {
     try {
-      return await FlutterBluetoothClassicPlatform.instance.isBluetoothEnabled();
+      return await FlutterBluetoothClassicPlatform.instance
+          .isBluetoothEnabled();
     } catch (e) {
       throw BluetoothException('Failed to check Bluetooth status: $e');
     }

@@ -1,8 +1,13 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_classic_serial/flutter_bluetooth_classic.dart';
+
+// Example app demonstrating Bluetooth Classic functionality.
+// Note: On web platform, device discovery requires user interaction
+// (button click) due to browser security restrictions.
+// When a device is selected from the browser picker, it auto-connects immediately.
 
 void main() {
   runApp(const MyApp());
@@ -165,8 +170,11 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
         _pairedDevices = devices;
       });
 
-      // Start discovery to find devices in range
-      _startDiscoveryWithTimeout();
+      // On non-web platforms, automatically start discovery
+      // On web, discovery requires user gesture, so we'll show a button instead
+      if (!kIsWeb) {
+        _startDiscoveryWithTimeout();
+      }
     } catch (e) {
       debugPrint('Error loading paired devices: $e');
     }
@@ -207,6 +215,30 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
         _discoveredDeviceAddresses.add(device.address);
       });
       debugPrint('Discovered device: ${device.name} (${device.address})');
+
+      // On web, auto-connect to discovered devices
+      if (kIsWeb &&
+          (_connectionState == null || !_connectionState!.isConnected)) {
+        debugPrint('Auto-connecting to discovered device on web...');
+        _connectToDevice(device);
+      }
+    });
+
+    // Listen for state changes to handle discovery errors
+    _bluetooth.onStateChanged.listen((state) {
+      // Check if this indicates a discovery error
+      if (state.status.startsWith('ERROR: USER_GESTURE_REQUIRED')) {
+        if (mounted && kIsWeb) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Please use the "Discover Devices" button to search for Bluetooth devices.',
+              ),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+      }
     });
   }
 
@@ -426,9 +458,29 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                               ],
                             ),
                           ),
-                          IconButton(
-                            onPressed: _isScanning ? null : _loadPairedDevices,
-                            icon: const Icon(Icons.refresh),
+                          Row(
+                            children: [
+                              if (kIsWeb && !_isScanning) ...[
+                                ElevatedButton.icon(
+                                  onPressed: _startDiscoveryWithTimeout,
+                                  icon: const Icon(Icons.search),
+                                  label: const Text('Discover Devices'),
+                                  style: ElevatedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 8,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                              ],
+                              IconButton(
+                                onPressed: _isScanning
+                                    ? null
+                                    : _loadPairedDevices,
+                                icon: const Icon(Icons.refresh),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -468,18 +520,24 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                                   ),
                                   const SizedBox(height: 16),
                                   Text(
-                                    'No paired devices in range',
+                                    kIsWeb
+                                        ? 'Click "Discover Devices" to search for Bluetooth devices'
+                                        : 'No paired devices in range',
                                     style: Theme.of(
                                       context,
                                     ).textTheme.bodyMedium,
+                                    textAlign: TextAlign.center,
                                   ),
                                   const SizedBox(height: 8),
-                                  const Text(
-                                    'Make sure devices are powered on',
-                                    style: TextStyle(
+                                  Text(
+                                    kIsWeb
+                                        ? 'Make sure Bluetooth devices are paired in system settings'
+                                        : 'Make sure devices are powered on',
+                                    style: const TextStyle(
                                       fontSize: 12,
                                       color: Colors.grey,
                                     ),
+                                    textAlign: TextAlign.center,
                                   ),
                                 ],
                               ),
@@ -492,11 +550,24 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                               final device = nearbyDevices[index];
                               final isConnected =
                                   _connectedDevice?.address == device.address;
+                              // On web, check if this device was just discovered and is auto-connecting
+                              final isAutoConnecting =
+                                  kIsWeb &&
+                                  _discoveredDeviceAddresses.contains(
+                                    device.address,
+                                  ) &&
+                                  _connectionState != null &&
+                                  _connectionState!.deviceAddress ==
+                                      device.address &&
+                                  _isConnecting;
+
                               return ListTile(
                                 leading: Icon(
                                   Icons.devices,
                                   color: isConnected
                                       ? Colors.green
+                                      : isAutoConnecting
+                                      ? Colors.orange
                                       : Colors.blue,
                                 ),
                                 title: Text(device.name),
@@ -506,11 +577,27 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                                         onPressed: _disconnect,
                                         child: const Text('Disconnect'),
                                       )
+                                    : isAutoConnecting
+                                    ? const Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          ),
+                                          SizedBox(width: 8),
+                                          Text('Auto-connecting...'),
+                                        ],
+                                      )
                                     : ElevatedButton(
                                         onPressed:
                                             _connectionState?.isConnected !=
                                                     true &&
-                                                !_isConnecting
+                                                !_isConnecting &&
+                                                !isAutoConnecting
                                             ? () => _connectToDevice(device)
                                             : null,
                                         child: _isConnecting

@@ -45,17 +45,34 @@ class _DefaultPlatform extends FlutterBluetoothClassicPlatform {
   static const EventChannel _dataChannel = EventChannel(
       'com.flutter_bluetooth_classic.plugin/flutter_bluetooth_classic_data');
 
-  @override
-  Stream<Map<String, dynamic>> get stateStream =>
-      _stateChannel.receiveBroadcastStream().cast<Map<String, dynamic>>();
+  // Helper function to convert map keys to String
+  Map<String, dynamic> _convertMapKeysToString(
+      Map<dynamic, dynamic> originalMap) {
+    final Map<String, dynamic> typedMap = {};
+    originalMap.forEach((key, value) {
+      if (key is String) {
+        typedMap[key] = value;
+      } else {
+        typedMap[key.toString()] = value; // Fallback for non-string keys
+      }
+    });
+    return typedMap;
+  }
 
   @override
-  Stream<Map<String, dynamic>> get connectionStream =>
-      _connectionChannel.receiveBroadcastStream().cast<Map<String, dynamic>>();
+  Stream<Map<String, dynamic>> get stateStream => _stateChannel
+      .receiveBroadcastStream()
+      .map((event) => _convertMapKeysToString(event as Map<dynamic, dynamic>));
 
   @override
-  Stream<Map<String, dynamic>> get dataStream =>
-      _dataChannel.receiveBroadcastStream().cast<Map<String, dynamic>>();
+  Stream<Map<String, dynamic>> get connectionStream => _connectionChannel
+      .receiveBroadcastStream()
+      .map((event) => _convertMapKeysToString(event as Map<dynamic, dynamic>));
+
+  @override
+  Stream<Map<String, dynamic>> get dataStream => _dataChannel
+      .receiveBroadcastStream()
+      .map((event) => _convertMapKeysToString(event as Map<dynamic, dynamic>));
 
   @override
   Future<bool> isBluetoothSupported() async {
@@ -75,7 +92,23 @@ class _DefaultPlatform extends FlutterBluetoothClassicPlatform {
   @override
   Future<List<Map<String, dynamic>>> getPairedDevices() async {
     final result = await _channel.invokeMethod('getPairedDevices');
-    return List<Map<String, dynamic>>.from(result ?? []);
+    if (result == null) {
+      return [];
+    }
+    final List<dynamic> rawList = result;
+    return rawList.map((e) {
+      final Map<dynamic, dynamic> rawMap = e;
+      final Map<String, dynamic> typedMap = {};
+      rawMap.forEach((key, value) {
+        if (key is String) {
+          typedMap[key] = value;
+        } else {
+          typedMap[key.toString()] =
+              value; // Fallback in case of non-string key
+        }
+      });
+      return typedMap;
+    }).toList();
   }
 
   @override
