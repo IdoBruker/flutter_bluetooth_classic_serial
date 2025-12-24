@@ -38,6 +38,16 @@ extension type JSSerialOptions._(JSObject _) implements JSObject {
 }
 
 @JS()
+@anonymous
+extension type JSSerialPortFilter._(JSObject _) implements JSObject {
+  external factory JSSerialPortFilter({
+    String? bluetoothServiceClassId,
+    int? usbVendorId,
+    int? usbProductId,
+  });
+}
+
+@JS()
 extension type SerialPortReadable._(JSObject _) implements JSObject {
   external SerialReader getReader();
 }
@@ -229,9 +239,14 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
   @override
   Future<bool> startDiscovery() async {
     try {
-      // Request a serial port (this will show a picker for available serial ports)
-      // Bluetooth Classic devices using SPP will appear as serial ports
-      final port = await serial.requestPort(null).toDart;
+      // Request a serial port filtered by SPP UUID
+      // This will show a picker for Bluetooth devices with Serial Port Profile (SPP)
+      // SPP UUID: 00001101-0000-1000-8000-00805F9B34FB
+      const sppUuid = "00001101-0000-1000-8000-00805f9b34fb";
+      final filter = JSSerialPortFilter(bluetoothServiceClassId: sppUuid);
+      final filters = [filter].toJS;
+      final options = JSSerialOptions(filters: filters);
+      final port = await serial.requestPort(options).toDart;
 
       // Generate a unique identifier for this port
       final portId = "serial_port_${DateTime.now().millisecondsSinceEpoch}";
