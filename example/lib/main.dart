@@ -7,7 +7,8 @@ import 'package:flutter_bluetooth_classic_serial/flutter_bluetooth_classic.dart'
 // Example app demonstrating Bluetooth Classic functionality.
 // Note: On web platform, device discovery requires user interaction
 // (button click) due to browser security restrictions.
-// When a device is selected from the browser picker, it auto-connects immediately.
+// When a device is selected from the browser picker, it is listed
+// and can be connected manually.
 
 void main() {
   runApp(const MyApp());
@@ -213,15 +214,12 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
     _bluetooth.onDeviceDiscovered.listen((device) {
       setState(() {
         _discoveredDeviceAddresses.add(device.address);
+        if (kIsWeb &&
+            !_pairedDevices.any((paired) => paired.address == device.address)) {
+          _pairedDevices = [..._pairedDevices, device];
+        }
       });
       debugPrint('Discovered device: ${device.name} (${device.address})');
-
-      // On web, auto-connect to discovered devices
-      if (kIsWeb &&
-          (_connectionState == null || !_connectionState!.isConnected)) {
-        debugPrint('Auto-connecting to discovered device on web...');
-        _connectToDevice(device);
-      }
     });
 
     // Listen for state changes to handle discovery errors
@@ -550,7 +548,7 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                               final device = nearbyDevices[index];
                               final isConnected =
                                   _connectedDevice?.address == device.address;
-                              // On web, check if this device was just discovered and is auto-connecting
+                              // On web, show a connecting state per device
                               final isAutoConnecting =
                                   kIsWeb &&
                                   _discoveredDeviceAddresses.contains(
@@ -589,7 +587,7 @@ class _BluetoothClassicDemoState extends State<BluetoothClassicDemo> {
                                             ),
                                           ),
                                           SizedBox(width: 8),
-                                          Text('Auto-connecting...'),
+                                          Text('Connecting...'),
                                         ],
                                       )
                                     : ElevatedButton(

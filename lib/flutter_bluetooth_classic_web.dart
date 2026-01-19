@@ -19,10 +19,10 @@ extension type Serial._(JSObject _) implements JSObject {
 
 @JS()
 extension type SerialPort._(JSObject _) implements JSObject {
-  external JSPromise<JSAny> open(JSSerialOptions options);
-  external JSPromise<JSAny> close();
-  external SerialPortReadable get readable;
-  external SerialPortWritable get writable;
+  external JSPromise<JSAny?> open(JSSerialOptions options);
+  external JSPromise<JSAny?> close();
+  external SerialPortReadable? get readable;
+  external SerialPortWritable? get writable;
   external bool get connected;
   external JSFunction? get ondisconnect;
   external set ondisconnect(JSFunction? value);
@@ -71,7 +71,7 @@ extension type SerialPortWritable._(JSObject _) implements JSObject {
 
 @JS()
 extension type SerialWriter._(JSObject _) implements JSObject {
-  external JSPromise<JSAny> write(JSUint8Array data);
+  external JSPromise<JSAny?> write(JSUint8Array data);
   external void releaseLock();
 }
 
@@ -93,12 +93,14 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
   SerialReader? _reader;
   SerialWriter? _writer;
   bool _isReading = false;
+  bool _isConnecting = false;
 
   // Storage for discovered ports (Web Serial port objects)
   final Map<String, SerialPort> _discoveredPorts = {};
 
   void _cleanup() {
     _isReading = false;
+    _isConnecting = false;
 
     if (_reader != null) {
       _reader!.releaseLock();
@@ -119,8 +121,13 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
     _isReading = true;
 
     try {
-      while (_port!.readable != null && _isReading) {
-        _reader = _port!.readable.getReader();
+      while (_isReading) {
+        final readable = _port!.readable;
+        if (readable == null) {
+          break;
+        }
+
+        _reader = readable.getReader();
 
         while (true) {
           final result = await _reader!.read().toDart;
@@ -266,9 +273,6 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
       });
 
       // On web, immediately attempt to connect to the selected device
-      // Start connection asynchronously (don't await) so discovery returns immediately
-      unawaited(connect(portId));
-
       return true;
     } catch (e) {
       print("Web Serial discovery error: $e");
@@ -288,15 +292,41 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
     if (port == null) {
       print(
           "Serial port not found in cache. Must call startDiscovery or getPairedDevices first on Web.");
+      _connectionController.add({
+        "isConnected": false,
+        "deviceAddress": address,
+        "status": "ERROR: Port not found"
+      });
       return false;
     }
 
     try {
+      if (_port == port && _port!.connected) {
+        _connectionController.add({
+          "isConnected": true,
+          "deviceAddress": address,
+          "status": "CONNECTED"
+        });
+        return true;
+      }
+
+      if (_isConnecting) {
+        _connectionController.add({
+          "isConnected": false,
+          "deviceAddress": address,
+          "status": "CONNECTING"
+        });
+        return false;
+      }
+
+      _isConnecting = true;
+
       // Open the serial port with appropriate options for Bluetooth Classic
       // Baud rate is required by the API but Bluetooth Classic ignores it
       await port.open(JSSerialOptions(baudRate: 9600)).toDart;
 
       _port = port;
+      _isConnecting = false;
 
       // Notify connection success
       _connectionController.add({
@@ -323,6 +353,7 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
       return true;
     } catch (e) {
       print("Web Serial connection error: $e");
+      _isConnecting = false;
       _connectionController.add({
         "isConnected": false,
         "deviceAddress": address,
@@ -364,10 +395,15 @@ class FlutterBluetoothClassicWeb extends FlutterBluetoothClassicPlatform {
   @override
   Future<bool> sendData(Uint8List data) async {
     if (_port == null) return false;
+    final writable = _port!.writable;
+    if (writable == null) {
+      print("Serial port is not writable.");
+      return false;
+    }
 
     try {
       // Get writer and write data
-      _writer = _port!.writable.getWriter();
+      _writer = writable.getWriter();
       await _writer!.write(data.toJS).toDart;
       _writer!.releaseLock();
       _writer = null;
