@@ -315,7 +315,7 @@ class BluetoothManager: NSObject {
       self.connectionLock.unlock()
 
       let deviceAddress = self.connectedDevice?.addressString ?? "unknown"
-      self.rfcommChannel?.closeChannel()
+      self.rfcommChannel?.close()
       self.rfcommChannel = nil
       self.connectedDevice = nil
 
@@ -342,8 +342,16 @@ class BluetoothManager: NSObject {
         return
       }
 
-      let bytes = [UInt8](data)
-      let status = channel.writeSync(bytes, length: UInt16(bytes.count))
+      var bytes = [UInt8](data)
+      let status: IOReturn = bytes.withUnsafeMutableBytes { buffer in
+        if buffer.count == 0 {
+          return kIOReturnSuccess
+        }
+        guard let baseAddress = buffer.baseAddress else {
+          return kIOReturnError
+        }
+        return channel.writeSync(baseAddress, length: UInt16(buffer.count))
+      }
       DispatchQueue.main.async {
         if status == kIOReturnSuccess {
           completion(true)
@@ -360,8 +368,12 @@ class BluetoothManager: NSObject {
     performOnIOThread { [weak self] in
       guard let self = self else { return }
       self.serverNotification?.unregister()
-      self.serverNotification = IOBluetoothRFCOMMChannel.register(forChannelID: self.listeningChannelID,
-                                                                   delegate: self)
+      self.serverNotification = IOBluetoothRFCOMMChannel.register(
+        forChannelOpenNotifications: self,
+        selector: #selector(rfcommChannelOpenedNotification(_:channel:)),
+        withChannelID: self.listeningChannelID,
+        direction: kIOBluetoothUserNotificationChannelDirectionIncoming
+      )
       DispatchQueue.main.async {
         if self.serverNotification != nil {
           completion(true)
@@ -454,6 +466,23 @@ class BluetoothManager: NSObject {
     }
     runLoop.perform(block)
   }
+
+  @objc private func rfcommChannelOpenedNotification(_ notification: IOBluetoothUserNotification,
+                                                     channel: IOBluetoothRFCOMMChannel) {
+    channel.setDelegate(self)
+    handleChannelOpened(channel)
+  }
+
+  private func handleChannelOpened(_ channel: IOBluetoothRFCOMMChannel) {
+    let device = channel.getDevice() ?? connectedDevice
+    connectedDevice = device
+    rfcommChannel = channel
+    connectionHandler.send([
+      "isConnected": true,
+      "deviceAddress": device?.addressString ?? "unknown",
+      "status": "CONNECTED"
+    ])
+  }
 }
 
 // MARK: - IOBluetoothDeviceInquiryDelegate
@@ -525,14 +554,8 @@ extension BluetoothManager: IOBluetoothRFCOMMChannelDelegate {
   }
 
   func rfcommChannelOpened(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
-    guard let device = rfcommChannel.device else { return }
-    connectedDevice = device
-    self.rfcommChannel = rfcommChannel
-    connectionHandler.send([
-      "isConnected": true,
-      "deviceAddress": device.addressString ?? "unknown",
-      "status": "CONNECTED"
-    ])
+    guard let rfcommChannel = rfcommChannel else { return }
+    handleChannelOpened(rfcommChannel)
   }
 }
 
