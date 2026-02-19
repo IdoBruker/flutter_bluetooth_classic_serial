@@ -152,8 +152,8 @@ private:
   winrt::event_token watcher_completed_token_{};
 
   // Active connection
-  std::unique_ptr<BluetoothConnection> active_connection_;
-  std::unique_ptr<BluetoothClassicComTransport> active_com_connection_;
+  std::shared_ptr<BluetoothConnection> active_connection_;
+  std::shared_ptr<BluetoothClassicComTransport> active_com_connection_;
   std::mutex connection_mutex_;
   std::unordered_map<std::string, ClassicDeviceInfo> known_devices_by_key_;
 

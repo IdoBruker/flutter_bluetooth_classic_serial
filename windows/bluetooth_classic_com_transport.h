@@ -4,6 +4,8 @@
 #include <flutter/encodable_value.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,7 +36,10 @@ class BluetoothClassicComTransport {
  private:
   std::string ToWindowsComPath(const std::string& com_port) const;
   void StartReadLoop();
+  void StartWriteLoop();
   void ReadLoop();
+  void WriteLoop();
+  void ReportDisconnected(const std::string& status);
   void SendConnectionState(bool is_connected, const std::string& status);
   void SendData(const std::vector<uint8_t>& data);
 
@@ -43,8 +48,12 @@ class BluetoothClassicComTransport {
   std::string device_address_;
   std::atomic<bool> is_connected_{false};
   std::atomic<bool> should_stop_{false};
+  std::atomic<bool> disconnect_reported_{false};
   std::thread read_thread_;
+  std::thread write_thread_;
   std::mutex write_mutex_;
+  std::condition_variable write_cv_;
+  std::deque<std::vector<uint8_t>> pending_writes_;
   EventStreamHandler<flutter::EncodableValue>* connection_handler_ = nullptr;
   EventStreamHandler<flutter::EncodableValue>* data_handler_ = nullptr;
 };

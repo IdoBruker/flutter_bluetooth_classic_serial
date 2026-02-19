@@ -107,6 +107,7 @@ bool BluetoothClassicComTransport::Open(std::string* error_message) {
   timeouts.ReadTotalTimeoutMultiplier = 1;
   timeouts.WriteTotalTimeoutConstant = 1000;
   timeouts.WriteTotalTimeoutMultiplier = 1;
+  SetupComm(handle, 4096, 4096);
   SetCommTimeouts(handle, &timeouts);
 
   PurgeComm(handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
@@ -114,8 +115,10 @@ bool BluetoothClassicComTransport::Open(std::string* error_message) {
   serial_handle_ = handle;
   should_stop_ = false;
   is_connected_ = true;
+  disconnect_reported_ = false;
   SendConnectionState(true, "CONNECTED: COM(" + com_port_ + ")");
   StartReadLoop();
+  StartWriteLoop();
   return true;
 }
 
@@ -124,22 +127,24 @@ void BluetoothClassicComTransport::WriteData(const std::vector<uint8_t>& data) {
     throw std::runtime_error("COM transport not connected");
   }
 
-  std::lock_guard<std::mutex> lock(write_mutex_);
-  DWORD bytes_written = 0;
-  if (!WriteFile(
-          reinterpret_cast<HANDLE>(serial_handle_),
-          data.data(),
-          static_cast<DWORD>(data.size()),
-          &bytes_written,
-          nullptr)) {
-    is_connected_ = false;
-    SendConnectionState(false, LastErrorMessage("WRITE_ERROR"));
-    throw std::runtime_error("Failed writing to COM transport");
+  {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    constexpr size_t kMaxPendingWrites = 256;
+    if (pending_writes_.size() >= kMaxPendingWrites) {
+      throw std::runtime_error("COM send queue is full");
+    }
+    pending_writes_.push_back(data);
   }
+  write_cv_.notify_one();
 }
 
 void BluetoothClassicComTransport::Close() {
   should_stop_ = true;
+  write_cv_.notify_all();
+  {
+    std::lock_guard<std::mutex> lock(write_mutex_);
+    pending_writes_.clear();
+  }
 
   HANDLE handle = reinterpret_cast<HANDLE>(serial_handle_);
   if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
@@ -150,10 +155,13 @@ void BluetoothClassicComTransport::Close() {
   if (read_thread_.joinable()) {
     read_thread_.join();
   }
+  if (write_thread_.joinable()) {
+    write_thread_.join();
+  }
 
   if (is_connected_) {
     is_connected_ = false;
-    SendConnectionState(false, "DISCONNECTED");
+    ReportDisconnected("DISCONNECTED");
   }
 }
 
@@ -170,6 +178,12 @@ void BluetoothClassicComTransport::StartReadLoop() {
   });
 }
 
+void BluetoothClassicComTransport::StartWriteLoop() {
+  write_thread_ = std::thread([this]() {
+    WriteLoop();
+  });
+}
+
 void BluetoothClassicComTransport::ReadLoop() {
   std::vector<uint8_t> buffer(1024);
   while (!should_stop_ && is_connected_) {
@@ -183,7 +197,7 @@ void BluetoothClassicComTransport::ReadLoop() {
     if (!ok) {
       if (!should_stop_) {
         is_connected_ = false;
-        SendConnectionState(false, LastErrorMessage("DISCONNECTED"));
+        ReportDisconnected(LastErrorMessage("DISCONNECTED"));
       }
       break;
     }
@@ -191,7 +205,52 @@ void BluetoothClassicComTransport::ReadLoop() {
     if (bytes_read > 0) {
       std::vector<uint8_t> data(buffer.begin(), buffer.begin() + bytes_read);
       SendData(data);
+    } else {
+      Sleep(2);
     }
+  }
+}
+
+void BluetoothClassicComTransport::WriteLoop() {
+  while (!should_stop_) {
+    std::vector<uint8_t> next_payload;
+    {
+      std::unique_lock<std::mutex> lock(write_mutex_);
+      write_cv_.wait(lock, [this]() { return should_stop_ || !pending_writes_.empty(); });
+      if (should_stop_) {
+        break;
+      }
+      next_payload = std::move(pending_writes_.front());
+      pending_writes_.pop_front();
+    }
+
+    HANDLE handle = reinterpret_cast<HANDLE>(serial_handle_);
+    if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
+      break;
+    }
+
+    const uint8_t* cursor = next_payload.data();
+    size_t remaining = next_payload.size();
+    while (remaining > 0 && !should_stop_) {
+      DWORD bytes_written = 0;
+      BOOL ok = WriteFile(handle, cursor, static_cast<DWORD>(remaining), &bytes_written, nullptr);
+      if (!ok || bytes_written == 0) {
+        if (!should_stop_) {
+          is_connected_ = false;
+          ReportDisconnected(LastErrorMessage("WRITE_ERROR"));
+        }
+        return;
+      }
+      cursor += bytes_written;
+      remaining -= bytes_written;
+    }
+  }
+}
+
+void BluetoothClassicComTransport::ReportDisconnected(const std::string& status) {
+  bool expected = false;
+  if (disconnect_reported_.compare_exchange_strong(expected, true)) {
+    SendConnectionState(false, status);
   }
 }
 

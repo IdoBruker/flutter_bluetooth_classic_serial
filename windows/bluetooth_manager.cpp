@@ -50,16 +50,18 @@ BluetoothManager::~BluetoothManager() {
   }
 
   // Disconnect active connection
+  std::shared_ptr<BluetoothClassicComTransport> com_to_close;
+  std::shared_ptr<BluetoothConnection> winrt_to_close;
   {
     std::lock_guard<std::mutex> lock(connection_mutex_);
-    if (active_com_connection_) {
-      active_com_connection_->Close();
-      active_com_connection_.reset();
-    }
-    if (active_connection_) {
-      active_connection_->Close();
-      active_connection_.reset();
-    }
+    com_to_close = std::move(active_com_connection_);
+    winrt_to_close = std::move(active_connection_);
+  }
+  if (com_to_close) {
+    com_to_close->Close();
+  }
+  if (winrt_to_close) {
+    winrt_to_close->Close();
   }
 
   // Stop server
@@ -276,25 +278,28 @@ void BluetoothManager::Connect(
       std::string com_error;
       std::string winrt_error;
       bool connected = false;
+
+      std::shared_ptr<BluetoothClassicComTransport> com_to_close;
+      std::shared_ptr<BluetoothConnection> winrt_to_close;
       {
         std::lock_guard<std::mutex> lock(connection_mutex_);
-        if (active_com_connection_) {
-          active_com_connection_->Close();
-          active_com_connection_.reset();
-        }
-        if (active_connection_) {
-          active_connection_->Close();
-          active_connection_.reset();
-        }
+        com_to_close = std::move(active_com_connection_);
+        winrt_to_close = std::move(active_connection_);
+      }
+      if (com_to_close) {
+        com_to_close->Close();
+      }
+      if (winrt_to_close) {
+        winrt_to_close->Close();
+      }
 
-        if (!target.com_port.empty()) {
-          connected = ConnectViaComLocked(target, &com_error);
-        }
-        if (!connected) {
-          const std::string winrt_address =
-              !target.address.empty() ? target.address : NormalizeAddress(address);
-          connected = ConnectViaWinRtLocked(winrt_address, &winrt_error);
-        }
+      if (!target.com_port.empty()) {
+        connected = ConnectViaComLocked(target, &com_error);
+      }
+      if (!connected) {
+        const std::string winrt_address =
+            !target.address.empty() ? target.address : NormalizeAddress(address);
+        connected = ConnectViaWinRtLocked(winrt_address, &winrt_error);
       }
 
       if (connected) {
@@ -340,18 +345,21 @@ void BluetoothManager::Listen(
 
     // Create server with callback for incoming connections
     auto on_connection = [this](std::unique_ptr<BluetoothConnection> connection) {
-      std::lock_guard<std::mutex> lock(connection_mutex_);
-      if (active_com_connection_) {
-        active_com_connection_->Close();
-        active_com_connection_.reset();
+      std::shared_ptr<BluetoothClassicComTransport> com_to_close;
+      std::shared_ptr<BluetoothConnection> winrt_to_close;
+      std::shared_ptr<BluetoothConnection> new_connection(std::move(connection));
+      {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        com_to_close = std::move(active_com_connection_);
+        winrt_to_close = std::move(active_connection_);
+        active_connection_ = std::move(new_connection);
       }
-
-      // Close existing connection if any
-      if (active_connection_) {
-        active_connection_->Close();
+      if (com_to_close) {
+        com_to_close->Close();
       }
-      
-      active_connection_ = std::move(connection);
+      if (winrt_to_close) {
+        winrt_to_close->Close();
+      }
     };
 
     {
@@ -376,14 +384,18 @@ void BluetoothManager::Listen(
 
 void BluetoothManager::Disconnect(
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  std::lock_guard<std::mutex> lock(connection_mutex_);
-  if (active_com_connection_) {
-    active_com_connection_->Close();
-    active_com_connection_.reset();
+  std::shared_ptr<BluetoothClassicComTransport> com_to_close;
+  std::shared_ptr<BluetoothConnection> winrt_to_close;
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    com_to_close = std::move(active_com_connection_);
+    winrt_to_close = std::move(active_connection_);
   }
-  if (active_connection_) {
-    active_connection_->Close();
-    active_connection_.reset();
+  if (com_to_close) {
+    com_to_close->Close();
+  }
+  if (winrt_to_close) {
+    winrt_to_close->Close();
   }
 
   result->Success(flutter::EncodableValue(true));
@@ -404,10 +416,16 @@ void BluetoothManager::StopListen(
 void BluetoothManager::SendData(
     const std::vector<uint8_t>& data,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  std::lock_guard<std::mutex> lock(connection_mutex_);
+  std::shared_ptr<BluetoothConnection> winrt_connection;
+  std::shared_ptr<BluetoothClassicComTransport> com_connection;
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    winrt_connection = active_connection_;
+    com_connection = active_com_connection_;
+  }
 
-  const bool winrt_connected = active_connection_ && active_connection_->IsConnected();
-  const bool com_connected = active_com_connection_ && active_com_connection_->IsConnected();
+  const bool winrt_connected = winrt_connection && winrt_connection->IsConnected();
+  const bool com_connected = com_connection && com_connection->IsConnected();
   if (!winrt_connected && !com_connected) {
     result->Error("NOT_CONNECTED", "Not connected to any device");
     return;
@@ -415,9 +433,9 @@ void BluetoothManager::SendData(
 
   try {
     if (com_connected) {
-      active_com_connection_->WriteData(data);
+      com_connection->WriteData(data);
     } else {
-      active_connection_->WriteData(data);
+      winrt_connection->WriteData(data);
     }
     result->Success(flutter::EncodableValue(true));
   } catch (hresult_error const& ex) {
@@ -604,7 +622,7 @@ bool BluetoothManager::ConnectViaComLocked(const ClassicDeviceInfo& device, std:
     return false;
   }
 
-  auto connection = std::make_unique<BluetoothClassicComTransport>(
+  auto connection = std::make_shared<BluetoothClassicComTransport>(
       device.com_port, !device.address.empty() ? device.address : "COM:" + device.com_port, connection_handler_, data_handler_);
 
   std::string open_error;
@@ -614,7 +632,11 @@ bool BluetoothManager::ConnectViaComLocked(const ClassicDeviceInfo& device, std:
     }
     return false;
   }
-  active_com_connection_ = std::move(connection);
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    active_com_connection_ = std::move(connection);
+    active_connection_.reset();
+  }
   return true;
 }
 
@@ -669,8 +691,13 @@ bool BluetoothManager::ConnectViaWinRtLocked(const std::string& address, std::st
       socket.ConnectAsync(rfcomm_service.ConnectionHostName(), rfcomm_service.ConnectionServiceName());
   connect_async.get();
 
-  active_connection_ =
-      std::make_unique<BluetoothConnection>(socket, normalized_address, connection_handler_, data_handler_);
+  auto connection =
+      std::make_shared<BluetoothConnection>(socket, normalized_address, connection_handler_, data_handler_);
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    active_connection_ = std::move(connection);
+    active_com_connection_.reset();
+  }
   return true;
 }
 
