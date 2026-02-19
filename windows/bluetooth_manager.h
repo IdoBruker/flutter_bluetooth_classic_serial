@@ -18,10 +18,13 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <functional>
 #include <future>
 #include <thread>
 #include <type_traits>
+
+#include "bluetooth_device_model.h"
 
 namespace flutter_bluetooth_classic {
 
@@ -29,6 +32,7 @@ namespace flutter_bluetooth_classic {
 template<typename T>
 class EventStreamHandler;
 class BluetoothConnection;
+class BluetoothClassicComTransport;
 class BluetoothServer;
 
 class BluetoothManager {
@@ -79,6 +83,12 @@ private:
   void InitializeBluetoothRadio();
   std::string BluetoothAddressToString(uint64_t address);
   uint64_t StringToBluetoothAddress(const std::string& address);
+  std::string NormalizeAddress(const std::string& address);
+  std::string NormalizeComPort(const std::string& com_port);
+  std::vector<ClassicDeviceInfo> BuildMergedClassicDeviceList();
+  void CacheKnownDevices(const std::vector<ClassicDeviceInfo>& devices);
+  bool ConnectViaComLocked(const ClassicDeviceInfo& device, std::string* error_message);
+  bool ConnectViaWinRtLocked(const std::string& address, std::string* error_message);
   
   // Template helper to run async operations on a background thread
   template<typename TResult, typename TAsync>
@@ -143,7 +153,9 @@ private:
 
   // Active connection
   std::unique_ptr<BluetoothConnection> active_connection_;
+  std::unique_ptr<BluetoothClassicComTransport> active_com_connection_;
   std::mutex connection_mutex_;
+  std::unordered_map<std::string, ClassicDeviceInfo> known_devices_by_key_;
 
   // Server for incoming connections
   std::unique_ptr<BluetoothServer> bluetooth_server_;

@@ -21,6 +21,8 @@ add_library(${PLUGIN_NAME} SHARED
   "bluetooth_manager.cpp"
   "bluetooth_connection.cpp"
   "bluetooth_server.cpp"
+  "bluetooth_classic_registry_enum.cpp"
+  "bluetooth_classic_com_transport.cpp"
 )
 
 # Apply standard build settings
@@ -64,6 +66,8 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin)
 target_link_libraries(${PLUGIN_NAME} PRIVATE
   windowsapp.lib
   ws2_32.lib
+  setupapi.lib
+  Advapi32.lib
 )
 
 # List of absolute paths to libraries that should be bundled with the plugin.

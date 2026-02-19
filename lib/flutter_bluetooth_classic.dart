@@ -225,11 +225,17 @@ class BluetoothDevice {
   final String name;
   final String address;
   final bool paired;
+  final String comPort;
+  final String source;
+  final String deviceId;
 
   BluetoothDevice({
     required this.name,
     required this.address,
     required this.paired,
+    this.comPort = '',
+    this.source = '',
+    this.deviceId = '',
   });
 
   factory BluetoothDevice.fromMap(dynamic map) {
@@ -237,6 +243,9 @@ class BluetoothDevice {
       name: map['name'] ?? 'Unknown',
       address: map['address'],
       paired: map['paired'] ?? false,
+      comPort: map['comPort'] ?? '',
+      source: map['source'] ?? '',
+      deviceId: map['deviceId'] ?? '',
     );
   }
 
@@ -245,6 +254,9 @@ class BluetoothDevice {
       'name': name,
       'address': address,
       'paired': paired,
+      'comPort': comPort,
+      'source': source,
+      'deviceId': deviceId,
     };
   }
 }

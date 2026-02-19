@@ -8,12 +8,18 @@ class BluetoothDevice {
   final String address;
   final bool connected;
   final bool remembered;
+  final String comPort;
+  final String source;
+  final String deviceId;
 
   BluetoothDevice({
     required this.name,
     required this.address,
     required this.connected,
     required this.remembered,
+    this.comPort = '',
+    this.source = '',
+    this.deviceId = '',
   });
 
   factory BluetoothDevice.fromMap(Map<String, dynamic> map) {
@@ -22,6 +28,9 @@ class BluetoothDevice {
       address: map['address'] ?? '',
       connected: map['connected'] ?? false,
       remembered: map['remembered'] ?? false,
+      comPort: map['comPort'] ?? '',
+      source: map['source'] ?? '',
+      deviceId: map['deviceId'] ?? '',
     );
   }
 }
@@ -65,6 +74,8 @@ class BluetoothService {
         );
       }
 
+      // Trigger platform watcher updates while also returning the current merged list.
+      await _platform.startDiscovery();
       final devices = await _platform.getPairedDevices();
       return devices.map((device) => BluetoothDevice.fromMap(device)).toList();
     } catch (e) {
