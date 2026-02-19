@@ -75,6 +75,41 @@ std::string ExtractAddressFromPath(const std::string& path) {
   return ToUpper(match[1].str());
 }
 
+std::string ResolveFriendlyNameFromDevNode(HKEY root_key, const std::string& address_12_hex) {
+  if (address_12_hex.empty()) {
+    return "";
+  }
+
+  const std::wstring base_path =
+      Utf8ToWide("SYSTEM\\CurrentControlSet\\Enum\\BTHENUM\\Dev_" + ToUpper(address_12_hex));
+  HKEY base_key = nullptr;
+  if (RegOpenKeyExW(root_key, base_path.c_str(), 0, KEY_READ, &base_key) != ERROR_SUCCESS) {
+    return "";
+  }
+
+  std::string resolved_name;
+  DWORD index = 0;
+  wchar_t name_buffer[512];
+  DWORD name_len = sizeof(name_buffer) / sizeof(name_buffer[0]);
+  while (RegEnumKeyExW(
+             base_key, index, name_buffer, &name_len, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS) {
+    HKEY child_key = nullptr;
+    if (RegOpenKeyExW(base_key, name_buffer, 0, KEY_READ, &child_key) == ERROR_SUCCESS) {
+      resolved_name = GetStringRegValue(child_key, L"FriendlyName");
+      RegCloseKey(child_key);
+      if (!resolved_name.empty()) {
+        break;
+      }
+    }
+
+    ++index;
+    name_len = sizeof(name_buffer) / sizeof(name_buffer[0]);
+  }
+
+  RegCloseKey(base_key);
+  return resolved_name;
+}
+
 void EnumerateBthEnumRecursive(
     HKEY root_key,
     const std::wstring& subkey_path,
@@ -110,14 +145,21 @@ void EnumerateBthEnumRecursive(
       port_name = ToUpper(port_name);
       if (seen_com_ports->insert(port_name).second) {
         const std::string path_utf8 = WideToUtf8(subkey_path);
+        const std::string address = ExtractAddressFromPath(path_utf8);
         std::string device_name = !friendly_name.empty() ? friendly_name : device_desc;
+        if (device_name.empty() || device_name.find("Standard Serial") != std::string::npos) {
+          const std::string dev_node_name = ResolveFriendlyNameFromDevNode(root_key, address);
+          if (!dev_node_name.empty()) {
+            device_name = dev_node_name;
+          }
+        }
         if (device_name.empty()) {
           device_name = port_name;
         }
 
         ClassicDeviceInfo device;
         device.name = device_name;
-        device.address = ExtractAddressFromPath(path_utf8);
+        device.address = address;
         device.com_port = port_name;
         device.device_id = path_utf8;
         device.source = "registry-bthenum";
