@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -102,12 +103,13 @@ bool BluetoothClassicComTransport::Open(std::string* error_message) {
 
   COMMTIMEOUTS timeouts;
   SecureZeroMemory(&timeouts, sizeof(timeouts));
-  timeouts.ReadIntervalTimeout = 50;
-  timeouts.ReadTotalTimeoutConstant = 50;
-  timeouts.ReadTotalTimeoutMultiplier = 1;
-  timeouts.WriteTotalTimeoutConstant = 1000;
-  timeouts.WriteTotalTimeoutMultiplier = 1;
-  SetupComm(handle, 4096, 4096);
+  // Read settings optimized for low-latency non-blocking polling.
+  timeouts.ReadIntervalTimeout = MAXDWORD;
+  timeouts.ReadTotalTimeoutConstant = 0;
+  timeouts.ReadTotalTimeoutMultiplier = 0;
+  timeouts.WriteTotalTimeoutConstant = 100;
+  timeouts.WriteTotalTimeoutMultiplier = 0;
+  SetupComm(handle, 65536, 65536);
   SetCommTimeouts(handle, &timeouts);
 
   PurgeComm(handle, PURGE_RXCLEAR | PURGE_TXCLEAR);
@@ -147,16 +149,31 @@ void BluetoothClassicComTransport::Close() {
   }
 
   HANDLE handle = reinterpret_cast<HANDLE>(serial_handle_);
+  if (read_thread_.joinable()) {
+    CancelSynchronousIo(reinterpret_cast<HANDLE>(read_thread_.native_handle()));
+  }
+  if (write_thread_.joinable()) {
+    CancelSynchronousIo(reinterpret_cast<HANDLE>(write_thread_.native_handle()));
+  }
   if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
+    PurgeComm(handle, PURGE_RXABORT | PURGE_TXABORT | PURGE_RXCLEAR | PURGE_TXCLEAR);
     CloseHandle(handle);
   }
   serial_handle_ = nullptr;
 
   if (read_thread_.joinable()) {
-    read_thread_.join();
+    if (std::this_thread::get_id() != read_thread_.get_id()) {
+      read_thread_.join();
+    } else {
+      read_thread_.detach();
+    }
   }
   if (write_thread_.joinable()) {
-    write_thread_.join();
+    if (std::this_thread::get_id() != write_thread_.get_id()) {
+      write_thread_.join();
+    } else {
+      write_thread_.detach();
+    }
   }
 
   if (is_connected_) {
@@ -185,28 +202,59 @@ void BluetoothClassicComTransport::StartWriteLoop() {
 }
 
 void BluetoothClassicComTransport::ReadLoop() {
-  std::vector<uint8_t> buffer(1024);
+  std::vector<uint8_t> buffer(4096);
   while (!should_stop_ && is_connected_) {
     HANDLE handle = reinterpret_cast<HANDLE>(serial_handle_);
     if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
       break;
     }
 
-    DWORD bytes_read = 0;
-    BOOL ok = ReadFile(handle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, nullptr);
-    if (!ok) {
+    DWORD errors = 0;
+    COMSTAT status;
+    if (!ClearCommError(handle, &errors, &status)) {
       if (!should_stop_) {
         is_connected_ = false;
-        ReportDisconnected(LastErrorMessage("DISCONNECTED"));
+        ReportDisconnected(LastErrorMessage("CLEAR_COMM_FAILED"));
       }
-      break;
+      return;
     }
 
-    if (bytes_read > 0) {
+    if (status.cbInQue == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
+
+    while (!should_stop_ && is_connected_) {
+      DWORD to_read = static_cast<DWORD>(std::min<size_t>(status.cbInQue, buffer.size()));
+      if (to_read == 0) {
+        break;
+      }
+
+      DWORD bytes_read = 0;
+      BOOL read_ok = ReadFile(handle, buffer.data(), to_read, &bytes_read, nullptr);
+      if (!read_ok) {
+        DWORD read_error = GetLastError();
+        if (should_stop_ || read_error == ERROR_OPERATION_ABORTED || read_error == ERROR_INVALID_HANDLE) {
+          return;
+        }
+        is_connected_ = false;
+        ReportDisconnected(LastErrorMessage("READ_FAILED"));
+        return;
+      }
+      if (bytes_read == 0) {
+        break;
+      }
+
       std::vector<uint8_t> data(buffer.begin(), buffer.begin() + bytes_read);
       SendData(data);
-    } else {
-      Sleep(2);
+
+      if (!ClearCommError(handle, &errors, &status)) {
+        if (!should_stop_) {
+          is_connected_ = false;
+          ReportDisconnected(LastErrorMessage("CLEAR_COMM_FAILED"));
+        }
+        return;
+      }
     }
   }
 }
@@ -235,6 +283,10 @@ void BluetoothClassicComTransport::WriteLoop() {
       DWORD bytes_written = 0;
       BOOL ok = WriteFile(handle, cursor, static_cast<DWORD>(remaining), &bytes_written, nullptr);
       if (!ok || bytes_written == 0) {
+        DWORD write_error = GetLastError();
+        if (should_stop_ || write_error == ERROR_OPERATION_ABORTED || write_error == ERROR_INVALID_HANDLE) {
+          return;
+        }
         if (!should_stop_) {
           is_connected_ = false;
           ReportDisconnected(LastErrorMessage("WRITE_ERROR"));
