@@ -174,7 +174,7 @@ class ExternalAccessoryManager: NSObject {
   private let PROTOCOL_SUBSTRING = "igaro"
   
   // Supported device name prefixes (case-insensitive)
-  private let SUPPORTED_DEVICES = ["labdisc", "minidisc", "datahub", "forceacc"]
+  private let SUPPORTED_DEVICES = ["labdisc", "minidisc", "datahub", "forceacc", "sensordisc"]
   
   private var currentAccessory: EAAccessory?
   private var currentSession: EASession?
