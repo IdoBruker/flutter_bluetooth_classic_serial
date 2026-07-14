@@ -146,14 +146,14 @@ void EnumerateBthEnumRecursive(
       if (seen_com_ports->insert(port_name).second) {
         const std::string path_utf8 = WideToUtf8(subkey_path);
         const std::string address = ExtractAddressFromPath(path_utf8);
-        std::string device_name = !friendly_name.empty() ? friendly_name : device_desc;
-        if (device_name.empty() || device_name.find("Standard Serial") != std::string::npos) {
-          const std::string dev_node_name = ResolveFriendlyNameFromDevNode(root_key, address);
-          if (!dev_node_name.empty()) {
-            device_name = dev_node_name;
-          }
-        }
+        // Prefer Dev_<MAC> FriendlyName (matches Qt Win8+ BTDevices path).
+        // SPP/COM nodes often carry generic names like "Standard Serial over
+        // Bluetooth link" that would fail app-side Labdisc name filters.
+        std::string device_name = ResolveFriendlyNameFromDevNode(root_key, address);
         if (device_name.empty()) {
+          device_name = !friendly_name.empty() ? friendly_name : device_desc;
+        }
+        if (device_name.empty() || device_name.find("Standard Serial") != std::string::npos) {
           device_name = port_name;
         }
 
