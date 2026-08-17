@@ -7,8 +7,11 @@
 
 #include <winrt/Windows.Foundation.Collections.h>
 
+#include <windows.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <iomanip>
 #include <sstream>
 
@@ -21,6 +24,25 @@ using namespace Windows::Devices::Radios;
 using namespace Windows::Networking::Sockets;
 
 namespace flutter_bluetooth_classic {
+namespace {
+
+std::string WideToUtf8(const std::wstring& ws) {
+  if (ws.empty()) {
+    return "";
+  }
+  const int size_needed =
+      WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), nullptr, 0, nullptr, nullptr);
+  if (size_needed <= 0) {
+    return "";
+  }
+  std::string str_to(size_needed, 0);
+  WideCharToMultiByte(
+      CP_UTF8, 0, ws.c_str(), static_cast<int>(ws.size()), &str_to[0], size_needed, nullptr, nullptr);
+  return str_to;
+}
+
+}  // namespace
+
 
 BluetoothManager::BluetoothManager(
     EventStreamHandler<flutter::EncodableValue>* state_handler,
@@ -263,10 +285,22 @@ void BluetoothManager::Connect(
       bool has_target = false;
       {
         std::lock_guard<std::mutex> lock(connection_mutex_);
-        auto known = known_devices_by_key_.find(request_key);
-        if (known != known_devices_by_key_.end()) {
-          target = known->second;
-          has_target = true;
+        const std::string keys[] = {
+            request_key,
+            NormalizeAddress(address),
+            address,
+            "COM:" + NormalizeComPort(address),
+        };
+        for (const auto& key : keys) {
+          if (key.empty()) {
+            continue;
+          }
+          auto known = known_devices_by_key_.find(key);
+          if (known != known_devices_by_key_.end()) {
+            target = known->second;
+            has_target = true;
+            break;
+          }
         }
       }
 
@@ -535,19 +569,19 @@ std::vector<ClassicDeviceInfo> BluetoothManager::BuildMergedClassicDeviceList() 
     merged[registry_device.connect_key] = registry_device;
   }
 
-  hstring selector = BluetoothDevice::GetDeviceSelectorFromPairingState(true);
+  // Include unpaired Classic devices so the list is a superset of the web
+  // Serial picker (Chrome can pair from the picker; WinRT pairing-state=true
+  // would hide those until they are already bonded).
+  hstring selector = BluetoothDevice::GetDeviceSelector();
   auto devices_async = DeviceInformation::FindAllAsync(selector);
   auto devices = RunOnBackgroundThread<decltype(devices_async.get())>(devices_async);
   for (const auto& device_info : devices) {
     ClassicDeviceInfo device;
-    std::wstring name_wide = device_info.Name().c_str();
-    device.name = std::string(name_wide.begin(), name_wide.end());
-    device.paired = true;
+    device.name = WideToUtf8(std::wstring(device_info.Name().c_str()));
+    device.paired = device_info.Pairing().IsPaired();
     device.remembered = true;
-    device.source = "winrt-classic";
-
-    std::wstring id_wide = device_info.Id().c_str();
-    device.device_id = std::string(id_wide.begin(), id_wide.end());
+    device.source = device.paired ? "winrt-classic" : "winrt-unpaired";
+    device.device_id = WideToUtf8(std::wstring(device_info.Id().c_str()));
 
     try {
       auto bt_device_async = BluetoothDevice::FromIdAsync(device_info.Id());
@@ -560,6 +594,10 @@ std::vector<ClassicDeviceInfo> BluetoothManager::BuildMergedClassicDeviceList() 
     }
 
     if (device.address.empty()) {
+      device.address = NormalizeAddress(
+          BluetoothClassicRegistryEnumerator::ExtractAddressFromHardwareId(device.device_id));
+    }
+    if (device.address.empty()) {
       continue;
     }
     device.connect_key = device.address;
@@ -569,18 +607,7 @@ std::vector<ClassicDeviceInfo> BluetoothManager::BuildMergedClassicDeviceList() 
       merged[device.connect_key] = device;
       continue;
     }
-    ClassicDeviceInfo& existing = it->second;
-    if (existing.name.empty() && !device.name.empty()) {
-      existing.name = device.name;
-    }
-    if (existing.device_id.empty()) {
-      existing.device_id = device.device_id;
-    }
-    existing.paired = existing.paired || device.paired;
-    existing.remembered = existing.remembered || device.remembered;
-    if (existing.source != "winrt-classic") {
-      existing.source = "registry+winrt";
-    }
+    MergeClassicDevice(&it->second, device);
   }
 
   std::vector<ClassicDeviceInfo> result;
@@ -598,18 +625,48 @@ std::vector<ClassicDeviceInfo> BluetoothManager::BuildMergedClassicDeviceList() 
   return result;
 }
 
+void BluetoothManager::MergeClassicDevice(ClassicDeviceInfo* dest, const ClassicDeviceInfo& src) {
+  if (dest == nullptr) {
+    return;
+  }
+  dest->name = BluetoothClassicRegistryEnumerator::PreferBetterName(dest->name, src.name);
+  if (dest->com_port.empty() && !src.com_port.empty()) {
+    dest->com_port = src.com_port;
+  }
+  if (dest->address.empty() && !src.address.empty()) {
+    dest->address = src.address;
+  }
+  if (dest->device_id.empty() && !src.device_id.empty()) {
+    dest->device_id = src.device_id;
+  }
+  dest->paired = dest->paired || src.paired;
+  dest->remembered = dest->remembered || src.remembered;
+  if (dest->source.empty()) {
+    dest->source = src.source;
+  } else if (!src.source.empty() && dest->source.find(src.source) == std::string::npos) {
+    dest->source += "+" + src.source;
+  }
+}
+
 void BluetoothManager::CacheKnownDevices(const std::vector<ClassicDeviceInfo>& devices) {
   std::lock_guard<std::mutex> lock(connection_mutex_);
-  known_devices_by_key_.clear();
+  auto store = [this](const std::string& key, const ClassicDeviceInfo& device) {
+    if (key.empty()) {
+      return;
+    }
+    auto it = known_devices_by_key_.find(key);
+    if (it == known_devices_by_key_.end()) {
+      known_devices_by_key_[key] = device;
+      return;
+    }
+    MergeClassicDevice(&it->second, device);
+  };
+
   for (const auto& device : devices) {
-    if (!device.connect_key.empty()) {
-      known_devices_by_key_[device.connect_key] = device;
-    }
-    if (!device.address.empty()) {
-      known_devices_by_key_[NormalizeAddress(device.address)] = device;
-    }
+    store(device.connect_key, device);
+    store(NormalizeAddress(device.address), device);
     if (!device.com_port.empty()) {
-      known_devices_by_key_["COM:" + NormalizeComPort(device.com_port)] = device;
+      store("COM:" + NormalizeComPort(device.com_port), device);
     }
   }
 }
@@ -640,6 +697,38 @@ bool BluetoothManager::ConnectViaComLocked(const ClassicDeviceInfo& device, std:
   return true;
 }
 
+bool BluetoothManager::TryPairIfNeeded(
+    const BluetoothDevice& bt_device,
+    std::string* error_message) {
+  try {
+    auto pairing = bt_device.DeviceInformation().Pairing();
+    if (pairing.IsPaired() || !pairing.CanPair()) {
+      return true;
+    }
+
+    auto pair_result = pairing.PairAsync().get();
+    const auto status = pair_result.Status();
+    if (status == DevicePairingResultStatus::Paired ||
+        status == DevicePairingResultStatus::AlreadyPaired) {
+      return true;
+    }
+    if (error_message != nullptr) {
+      *error_message = "PAIRING_FAILED:" + std::to_string(static_cast<int32_t>(status));
+    }
+    return false;
+  } catch (hresult_error const& ex) {
+    if (error_message != nullptr) {
+      *error_message = "PAIRING_ERROR:" + WideToUtf8(std::wstring(ex.message().c_str()));
+    }
+    return false;
+  } catch (...) {
+    if (error_message != nullptr) {
+      *error_message = "PAIRING_ERROR";
+    }
+    return false;
+  }
+}
+
 bool BluetoothManager::ConnectViaWinRtLocked(const std::string& address, std::string* error_message) {
   const std::string normalized_address = NormalizeAddress(address);
   if (normalized_address.empty()) {
@@ -659,29 +748,43 @@ bool BluetoothManager::ConnectViaWinRtLocked(const std::string& address, std::st
     return false;
   }
 
-  auto services_async = bt_device.GetRfcommServicesAsync(BluetoothCacheMode::Uncached);
-  auto services_result = services_async.get();
-  if (services_result.Services().Size() == 0) {
-    if (error_message != nullptr) {
-      *error_message = "NO_SERVICES";
-    }
-    return false;
-  }
+  std::string pair_error;
+  TryPairIfNeeded(bt_device, &pair_error);
 
-  RfcommServiceId spp_service_id = RfcommServiceId::SerialPort();
   RfcommDeviceService rfcomm_service{nullptr};
-  for (const auto& service : services_result.Services()) {
-    if (service.ServiceId().Uuid() == spp_service_id.Uuid()) {
-      rfcomm_service = service;
-      break;
+  RfcommServiceId spp_service_id = RfcommServiceId::SerialPort();
+  auto pick_service = [&](const RfcommDeviceServicesResult& services_result) {
+    if (!services_result || services_result.Services().Size() == 0) {
+      return;
+    }
+    for (const auto& service : services_result.Services()) {
+      if (service.ServiceId().Uuid() == spp_service_id.Uuid()) {
+        rfcomm_service = service;
+        return;
+      }
+    }
+    rfcomm_service = services_result.Services().GetAt(0);
+  };
+
+  try {
+    pick_service(bt_device.GetRfcommServicesForIdAsync(spp_service_id).get());
+  } catch (...) {
+  }
+  if (!rfcomm_service) {
+    try {
+      pick_service(bt_device.GetRfcommServicesAsync(BluetoothCacheMode::Cached).get());
+    } catch (...) {
     }
   }
-  if (!rfcomm_service && services_result.Services().Size() > 0) {
-    rfcomm_service = services_result.Services().GetAt(0);
+  if (!rfcomm_service) {
+    try {
+      pick_service(bt_device.GetRfcommServicesAsync(BluetoothCacheMode::Uncached).get());
+    } catch (...) {
+    }
   }
   if (!rfcomm_service) {
     if (error_message != nullptr) {
-      *error_message = "NO_SPP_SERVICE";
+      *error_message = pair_error.empty() ? "NO_SPP_SERVICE" : pair_error + "; NO_SPP_SERVICE";
     }
     return false;
   }
@@ -714,20 +817,25 @@ void BluetoothManager::OnDeviceAdded(
     if (!bt_device) return;
 
     ClassicDeviceInfo device;
-    std::wstring name_wide = device_info.Name().c_str();
-    device.name = std::string(name_wide.begin(), name_wide.end());
+    device.name = WideToUtf8(std::wstring(device_info.Name().c_str()));
     device.address = NormalizeAddress(BluetoothAddressToString(bt_device.BluetoothAddress()));
     device.paired = device_info.Pairing().IsPaired();
     device.remembered = true;
     device.source = "winrt-discovery";
     device.connect_key = device.address;
+    device.device_id = WideToUtf8(std::wstring(device_info.Id().c_str()));
 
     std::lock_guard<std::mutex> lock(connection_mutex_);
     auto known = known_devices_by_key_.find(device.connect_key);
     if (known != known_devices_by_key_.end()) {
-      device.com_port = known->second.com_port;
+      MergeClassicDevice(&known->second, device);
+      device = known->second;
+    } else {
+      known_devices_by_key_[device.connect_key] = device;
     }
-    known_devices_by_key_[device.connect_key] = device;
+    if (!device.com_port.empty()) {
+      known_devices_by_key_["COM:" + NormalizeComPort(device.com_port)] = device;
+    }
 
     flutter::EncodableMap event_map;
     event_map[flutter::EncodableValue("event")] = flutter::EncodableValue("deviceFound");

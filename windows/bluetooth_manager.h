@@ -86,8 +86,11 @@ private:
   std::string NormalizeAddress(const std::string& address);
   std::string NormalizeComPort(const std::string& com_port);
   std::vector<ClassicDeviceInfo> BuildMergedClassicDeviceList();
+  void MergeClassicDevice(ClassicDeviceInfo* dest, const ClassicDeviceInfo& src);
   void CacheKnownDevices(const std::vector<ClassicDeviceInfo>& devices);
   bool ConnectViaComLocked(const ClassicDeviceInfo& device, std::string* error_message);
+  bool TryPairIfNeeded(const winrt::Windows::Devices::Bluetooth::BluetoothDevice& bt_device,
+                       std::string* error_message);
   bool ConnectViaWinRtLocked(const std::string& address, std::string* error_message);
   
   // Template helper to run async operations on a background thread
